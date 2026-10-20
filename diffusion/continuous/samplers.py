@@ -1,19 +1,18 @@
-#diffusion/continuous/samplers.py
+# diffusion/continuous/samplers.py
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Tuple
 
 import torch
 from tqdm import tqdm
 
-from utils.ecc_secded import ecc_from_cfg, ecc_chunk_len
 from diffusion.continuous.logit_postprocess import _model_logits_continuous
+from utils.ecc_secded import ecc_chunk_len, ecc_from_cfg
 
 
-def _normalize_sc_refresh_mode(mode: Optional[str]) -> str:
+def _normalize_sc_refresh_mode(mode: str | None) -> str:
     mode = "refined" if mode is None else str(mode).lower()
     aliases = {
         "refined": "refined",
@@ -57,13 +56,15 @@ def logits_to_x0_hat(
     if is_cont_tokens:
         if logits.dim() != 3:
             raise ValueError(
-                f"Continuous token mode expects logits [B,S,V], got {tuple(logits.shape)}"
+                f"Continuous token mode expects logits [B,S,V], got "
+                f"{tuple(logits.shape)}"
             )
         return torch.softmax(logits.float(), dim=-1).to(dtype=dtype)
 
     if logits.dim() != 2:
         raise ValueError(
-            f"Continuous binary mode expects logits [B,S], got {tuple(logits.shape)}"
+            f"Continuous binary mode expects logits [B,S], got "
+            f"{tuple(logits.shape)}"
         )
     return torch.sigmoid(logits.float()).to(dtype=dtype)
 
@@ -81,9 +82,13 @@ def get_score_from_logits(logits, x_t, sigma):
       score   = (D(x, σ) - x) / σ²
     """
     if logits.dim() != 2:
-        raise ValueError(f"Expected binary logits [B,S], got {tuple(logits.shape)}")
+        raise ValueError(
+            f"Expected binary logits [B,S], got {tuple(logits.shape)}"
+        )
     if x_t.dim() != 2:
-        raise ValueError(f"Expected binary state x_t [B,S], got {tuple(x_t.shape)}")
+        raise ValueError(
+            f"Expected binary state x_t [B,S], got {tuple(x_t.shape)}"
+        )
 
     if isinstance(sigma, float):
         sigma = torch.tensor(sigma, device=x_t.device, dtype=x_t.dtype)
@@ -102,7 +107,8 @@ def get_score_from_logits(logits, x_t, sigma):
 # Helpers for ATI (Asymmetric Time Intervals)
 # -----------------------------------------------------------------------------
 
-def _resolve_ati_eta(cfg, ati_eta: Optional[float]) -> float:
+
+def _resolve_ati_eta(cfg, ati_eta: float | None) -> float:
     if ati_eta is not None:
         return max(0.0, float(ati_eta))
     ev = getattr(cfg, "evaluation", None)
@@ -120,12 +126,10 @@ def _resolve_ati_eta(cfg, ati_eta: Optional[float]) -> float:
 
 def _ati_shift_sigma_label(
     sigma_state: torch.Tensor,
-    sigma_noisier: Optional[torch.Tensor],
+    sigma_noisier: torch.Tensor | None,
     eta: float,
 ) -> torch.Tensor:
-    """
-    Local ATI label shift in log-sigma space.
-    """
+    """Local ATI label shift in log-sigma space."""
     if eta <= 0.0 or sigma_noisier is None:
         return sigma_state
 
@@ -147,6 +151,7 @@ def _ati_shift_sigma_label(
 # Helpers for stochastic EDM-style churn
 # -----------------------------------------------------------------------------
 
+
 @dataclass
 class _StochasticSamplerCfg:
     enabled: bool
@@ -164,8 +169,8 @@ def _clamp_prob01(x: float) -> float:
 def _resolve_sigma_bounds(
     cfg,
     *,
-    sigma_min_override: Optional[float],
-    sigma_max_override: Optional[float],
+    sigma_min_override: float | None,
+    sigma_max_override: float | None,
 ) -> tuple[float, float]:
     sigma_min = (
         float(sigma_min_override)
@@ -192,10 +197,15 @@ def _compute_edm_gamma(
 ) -> float:
     """
     EDM-style gamma:
-      gamma_i = min(S_churn / N, sqrt(2)-1) if sigma_i in [S_tmin, S_tmax]
+      gamma_i = min(S_churn / N, sqrt(2)-1) if sigma_i in [S_tmin,
+      S_tmax]
                 0 otherwise
     """
-    s = float(sigma_cur.item()) if isinstance(sigma_cur, torch.Tensor) else float(sigma_cur)
+    s = (
+        float(sigma_cur.item())
+        if isinstance(sigma_cur, torch.Tensor)
+        else float(sigma_cur)
+    )
     if s < float(s_tmin) or s > float(s_tmax):
         return 0.0
     if num_intervals <= 0:
@@ -223,7 +233,9 @@ def _apply_edm_churn(
         return x, sigma_cur
 
     sigma_hat = sigma_cur * (1.0 + float(gamma))
-    sigma_delta = (sigma_hat.square() - sigma_cur.square()).clamp_min(0.0).sqrt()
+    sigma_delta = (
+        (sigma_hat.square() - sigma_cur.square()).clamp_min(0.0).sqrt()
+    )
 
     eps = torch.randn_like(x) * float(s_noise)
     x_hat = x + sigma_delta.to(device=x.device, dtype=x.dtype) * eps
@@ -233,6 +245,7 @@ def _apply_edm_churn(
 # -----------------------------------------------------------------------------
 # Helpers for conditional prompting + CFG
 # -----------------------------------------------------------------------------
+
 
 def _bits_per_unit(cfg) -> int:
     ecc = ecc_from_cfg(cfg)
@@ -246,7 +259,9 @@ def _bits_per_unit(cfg) -> int:
     return int(getattr(data, "bits_per_char", 1))
 
 
-def _get_cond_len_bits(cfg, seq_len: int, cond_len_bits_override: Optional[int] = None) -> int:
+def _get_cond_len_bits(
+    cfg, seq_len: int, cond_len_bits_override: int | None = None
+) -> int:
     """
     Backward-compatible prompt length in current model-space positions.
 
@@ -269,7 +284,9 @@ def _get_cond_len_bits(cfg, seq_len: int, cond_len_bits_override: Optional[int] 
     else:
         n_units = int(n_units)
 
-    repr_mode = str(getattr(getattr(cfg, "data", object()), "representation", "binary")).lower()
+    repr_mode = str(
+        getattr(getattr(cfg, "data", object()), "representation", "binary")
+    ).lower()
     if repr_mode == "tokens":
         cL = int(n_units)
     else:
@@ -288,13 +305,21 @@ def _make_null_value(
     vocab_size: int | None = None,
 ) -> torch.Tensor:
     cond_cfg = getattr(cfg, "cond", None)
-    strategy = str(getattr(cond_cfg, "null_strategy", "half")) if cond_cfg is not None else "half"
+    strategy = (
+        str(getattr(cond_cfg, "null_strategy", "half"))
+        if cond_cfg is not None
+        else "half"
+    )
 
     if is_cont_tokens:
         if strategy in {"half", "data_center"}:
             if vocab_size is None:
                 raise ValueError("vocab_size required for token null value")
-            dc = float(getattr(cfg.diffusion.continuous, "data_center", 1.0 / vocab_size))
+            dc = float(
+                getattr(
+                    cfg.diffusion.continuous, "data_center", 1.0 / vocab_size
+                )
+            )
             return torch.tensor(dc, device=device, dtype=dtype)
         if strategy == "zeros":
             return torch.tensor(0.0, device=device, dtype=dtype)
@@ -339,7 +364,11 @@ def _make_null_full(
         return out
 
     cond_cfg = getattr(cfg, "cond", None)
-    strategy = str(getattr(cond_cfg, "null_strategy", "half")) if cond_cfg is not None else "half"
+    strategy = (
+        str(getattr(cond_cfg, "null_strategy", "half"))
+        if cond_cfg is not None
+        else "half"
+    )
 
     if is_cont_tokens:
         pm = prefix_mask.unsqueeze(-1).expand_as(prefix_full)
@@ -381,13 +410,18 @@ def _make_null_full(
     return out
 
 
-def _expand_prefix_to_batch(prefix: torch.Tensor, B: int, device, dtype) -> torch.Tensor:
+def _expand_prefix_to_batch(
+    prefix: torch.Tensor, B: int, device, dtype
+) -> torch.Tensor:
     prefix = prefix.to(device=device, dtype=dtype)
     if prefix.dim() == 1:
         prefix = prefix.unsqueeze(0).expand(B, -1).contiguous()
     elif prefix.dim() == 2:
         if prefix.size(0) != B:
-            raise ValueError(f"conditioning_prefix batch mismatch: got {prefix.size(0)} vs B={B}")
+            raise ValueError(
+                f"conditioning_prefix batch mismatch: got {prefix.size(0)}"
+                f" vs B={B}"
+            )
     else:
         raise ValueError("conditioning_prefix must have shape [cL] or [B,cL]")
     return prefix
@@ -398,7 +432,9 @@ def _clamp_prefix_(x: torch.Tensor, prefix: torch.Tensor, cL: int) -> None:
         x[:, :cL] = prefix
 
 
-def _clamp_mask_(x: torch.Tensor, full: torch.Tensor, mask: torch.Tensor) -> None:
+def _clamp_mask_(
+    x: torch.Tensor, full: torch.Tensor, mask: torch.Tensor
+) -> None:
     """
     In-place clamp:
       binary: x/full [B,S], mask [B,S]
@@ -458,13 +494,15 @@ def _build_mask_conditioning(
     B: int,
     S: int,
     device: torch.device,
-    conditioning_prefix_full: Optional[torch.Tensor],
-    cond_prefix_mask: Optional[torch.Tensor],
-    conditioning_prefix: Optional[torch.Tensor],
-    cond_len_bits: Optional[int],
+    conditioning_prefix_full: torch.Tensor | None,
+    cond_prefix_mask: torch.Tensor | None,
+    conditioning_prefix: torch.Tensor | None,
+    cond_len_bits: int | None,
     is_cont_tokens: bool = False,
     vocab_size: int = 2,
-) -> Tuple[bool, Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
+) -> tuple[
+    bool, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None
+]:
     """
     Unifies legacy and new conditioning APIs.
 
@@ -481,20 +519,30 @@ def _build_mask_conditioning(
         if t.dim() == 3:
             if t.size(0) != B or t.size(1) != S or t.size(2) != vocab_size:
                 raise ValueError(
-                    f"conditioning_prefix_full must be [B,S,V]; got {tuple(t.shape)} vs {(B, S, vocab_size)}"
+                    f"conditioning_prefix_full must be [B,S,V]; got "
+                    f"{tuple(t.shape)} vs {(B, S, vocab_size)}"
                 )
             return t.to(device=device, dtype=torch.float32)
 
         if t.dim() == 1:
             if t.numel() != S:
-                raise ValueError(f"conditioning_prefix_full has length {t.numel()} but expected S={S}")
+                raise ValueError(
+                    f"conditioning_prefix_full has length {t.numel()} but "
+                    f"expected S={S}"
+                )
             t = t.view(1, S).expand(B, S)
 
         elif t.dim() == 2:
             if t.size(0) != B or t.size(1) != S:
-                raise ValueError(f"conditioning_prefix_full must be [B,S]; got {tuple(t.shape)}")
+                raise ValueError(
+                    f"conditioning_prefix_full must be [B,S]; got "
+                    f"{tuple(t.shape)}"
+                )
         else:
-            raise ValueError("conditioning_prefix_full must have shape [S], [B,S], or [B,S,V]")
+            raise ValueError(
+                "conditioning_prefix_full must have shape [S], [B,S], or"
+                " [B,S,V]"
+            )
 
         return torch.nn.functional.one_hot(
             t.to(device=device, dtype=torch.long),
@@ -507,27 +555,33 @@ def _build_mask_conditioning(
     if conditioning_prefix_full is not None or cond_prefix_mask is not None:
         if conditioning_prefix_full is None or cond_prefix_mask is None:
             raise ValueError(
-                "Must provide BOTH conditioning_prefix_full and cond_prefix_mask (or neither)."
+                "Must provide BOTH conditioning_prefix_full and "
+                "cond_prefix_mask (or neither)."
             )
 
         if is_cont_tokens:
             pf = _to_onehot_prefix(conditioning_prefix_full)
         else:
-            pf = conditioning_prefix_full.to(device=device, dtype=torch.float32)
+            pf = conditioning_prefix_full.to(
+                device=device, dtype=torch.float32
+            )
             if pf.dim() == 1:
                 if pf.numel() != S:
                     raise ValueError(
-                        f"conditioning_prefix_full has length {pf.numel()} but expected S={S}"
+                        f"conditioning_prefix_full has length {pf.numel()}"
+                        f" but expected S={S}"
                     )
                 pf = pf.view(1, S).expand(B, S).contiguous()
             elif pf.dim() == 2:
                 if pf.size(0) != B or pf.size(1) != S:
                     raise ValueError(
-                        f"conditioning_prefix_full must be [B,S]; got {tuple(pf.shape)}"
+                        f"conditioning_prefix_full must be [B,S]; got "
+                        f"{tuple(pf.shape)}"
                     )
             else:
                 raise ValueError(
-                    "conditioning_prefix_full must have shape [S] or [B,S] in binary mode"
+                    "conditioning_prefix_full must have shape [S] or "
+                    "[B,S] in binary mode"
                 )
 
         pm = cond_prefix_mask.to(device=device)
@@ -535,11 +589,16 @@ def _build_mask_conditioning(
             pm = pm.to(torch.bool)
         if pm.dim() == 1:
             if pm.numel() != S:
-                raise ValueError(f"cond_prefix_mask has length {pm.numel()} but expected S={S}")
+                raise ValueError(
+                    f"cond_prefix_mask has length {pm.numel()} but "
+                    f"expected S={S}"
+                )
             pm = pm.view(1, S).expand(B, S).contiguous()
         elif pm.dim() == 2:
             if pm.size(0) != B or pm.size(1) != S:
-                raise ValueError(f"cond_prefix_mask must be [B,S]; got {tuple(pm.shape)}")
+                raise ValueError(
+                    f"cond_prefix_mask must be [B,S]; got {tuple(pm.shape)}"
+                )
         else:
             raise ValueError("cond_prefix_mask must have shape [S] or [B,S]")
 
@@ -571,23 +630,32 @@ def _build_mask_conditioning(
         elif cp.dim() == 2:
             if cp.size(0) != B or cp.size(1) != cL:
                 raise ValueError(
-                    f"conditioning_prefix must be [B,cL] or [cL], got {tuple(cp.shape)}"
+                    f"conditioning_prefix must be [B,cL] or [cL], got "
+                    f"{tuple(cp.shape)}"
                 )
         else:
             raise ValueError(
-                "conditioning_prefix must have shape [cL] or [B,cL] in token mode"
+                "conditioning_prefix must have shape [cL] or [B,cL] in "
+                "token mode"
             )
 
-        cp_oh = torch.nn.functional.one_hot(cp.long(), num_classes=vocab_size).float()
-        prefix_full = torch.full((B, S, vocab_size), 0.0, device=device, dtype=torch.float32)
+        cp_oh = torch.nn.functional.one_hot(
+            cp.long(), num_classes=vocab_size
+        ).float()
+        prefix_full = torch.full(
+            (B, S, vocab_size), 0.0, device=device, dtype=torch.float32
+        )
         prefix_mask = torch.zeros((B, S), device=device, dtype=torch.bool)
         prefix_full[:, :cL, :] = cp_oh
         prefix_mask[:, :cL] = True
     else:
-        cond_prefix = _expand_prefix_to_batch(conditioning_prefix, B, device, torch.float32)
+        cond_prefix = _expand_prefix_to_batch(
+            conditioning_prefix, B, device, torch.float32
+        )
         if cond_prefix.size(1) != cL:
             raise ValueError(
-                f"conditioning_prefix has {cond_prefix.size(1)} bits but expected cL={cL}"
+                f"conditioning_prefix has {cond_prefix.size(1)} bits but "
+                f"expected cL={cL}"
             )
 
         prefix_full = torch.zeros((B, S), device=device, dtype=torch.float32)
@@ -604,14 +672,33 @@ def _build_mask_conditioning(
     )
     return True, prefix_full, prefix_mask, null_full
 
+
 # -----------------------------------------------------------------------------
 # Shared sigma-schedule provider
 # -----------------------------------------------------------------------------
 
 
+def truncate_schedule(
+    sigmas: torch.Tensor, sigma_start: float
+) -> torch.Tensor:
+    """Keep the tail of a descending sigma schedule at or below sigma_start."""
+    s_start = float(sigma_start)
+    tail = [s for s in sigmas.tolist() if s < s_start]
+    out = torch.tensor(
+        [s_start] + tail, device=sigmas.device, dtype=sigmas.dtype
+    )
+    if out.numel() < 2:
+        raise ValueError(
+            f"sigma_start={s_start} leaves fewer than two schedule points;"
+            f" raise sigma_start or raise num_steps"
+        )
+    return out
+
+
 class SigmaSchedule:
     """
-    Provides sampling sigma schedules (karras/entropic) and entropy table IO.
+    Provides sampling sigma schedules (karras/entropic) and entropy
+    table IO.
     """
 
     def __init__(self, process, cfg, device: torch.device):
@@ -624,14 +711,16 @@ class SigmaSchedule:
         return ckpt_path.parent.parent
 
     def _default_entropy_run_dir(self) -> Path:
-        ckpt_path = Path(self.cfg.evaluation.checkpoint_path).expanduser().resolve()
+        ckpt_path = (
+            Path(self.cfg.evaluation.checkpoint_path).expanduser().resolve()
+        )
         return self._entropy_run_dir_from_ckpt(ckpt_path)
 
     def _load_entropy_tables(
         self,
         *,
-        entropy_run_dir: Optional[Path] = None,
-    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
+        entropy_run_dir: Path | None = None,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
         if entropy_run_dir is None:
             entropy_run_dir = self._default_entropy_run_dir()
         else:
@@ -650,22 +739,30 @@ class SigmaSchedule:
         if not (pdf_p.exists() and cdf_p.exists() and sig_p.exists()):
             return None, None, None
 
-        pdf = torch.load(pdf_p, map_location=self.device, weights_only=True).to(self.device)
-        cdf = torch.load(cdf_p, map_location=self.device, weights_only=True).to(self.device)
-        sigs = torch.load(sig_p, map_location=self.device, weights_only=True).to(self.device)
+        pdf = torch.load(
+            pdf_p, map_location=self.device, weights_only=True
+        ).to(self.device)
+        cdf = torch.load(
+            cdf_p, map_location=self.device, weights_only=True
+        ).to(self.device)
+        sigs = torch.load(
+            sig_p, map_location=self.device, weights_only=True
+        ).to(self.device)
         return pdf, cdf, sigs
 
     def entropy_quantile(
         self,
         q: float,
         *,
-        entropy_run_dir: Optional[Path] = None,
-    ) -> Optional[float]:
+        entropy_run_dir: Path | None = None,
+    ) -> float | None:
         """
-        Return sigma at quantile q of the saved entropy CDF.
-        Assumes the saved sigma table is ascending in sigma.
+        Return sigma at quantile q of the saved entropy CDF. Assumes the
+        saved sigma table is ascending in sigma.
         """
-        _, cdf, sigmas_base = self._load_entropy_tables(entropy_run_dir=entropy_run_dir)
+        _, cdf, sigmas_base = self._load_entropy_tables(
+            entropy_run_dir=entropy_run_dir
+        )
         if cdf is None or sigmas_base is None:
             return None
 
@@ -698,9 +795,9 @@ class SigmaSchedule:
     def resolve_stochastic_cfg(
         self,
         *,
-        entropy_run_dir: Optional[Path] = None,
-        sigma_min_override: Optional[float] = None,
-        sigma_max_override: Optional[float] = None,
+        entropy_run_dir: Path | None = None,
+        sigma_min_override: float | None = None,
+        sigma_max_override: float | None = None,
     ) -> _StochasticSamplerCfg:
         """
         Resolve evaluation-time stochastic sampler config.
@@ -723,8 +820,14 @@ class SigmaSchedule:
             sigma_max_override=sigma_max_override,
         )
 
-        window_mode = str(getattr(st, "window_mode", "entropy_cdf")).lower().strip()
-        fallback = str(getattr(st, "entropy_fallback", "deterministic")).lower().strip()
+        window_mode = (
+            str(getattr(st, "window_mode", "entropy_cdf")).lower().strip()
+        )
+        fallback = (
+            str(getattr(st, "entropy_fallback", "deterministic"))
+            .lower()
+            .strip()
+        )
 
         s_churn = max(0.0, float(getattr(st, "s_churn", 0.0)))
         s_noise = max(0.0, float(getattr(st, "s_noise", 1.0)))
@@ -750,8 +853,16 @@ class SigmaSchedule:
             return _finalize(sigma_min, sigma_max)
 
         if window_mode == "fixed":
-            lo = sigma_min if getattr(st, "s_tmin", None) is None else float(st.s_tmin)
-            hi = sigma_max if getattr(st, "s_tmax", None) is None else float(st.s_tmax)
+            lo = (
+                sigma_min
+                if getattr(st, "s_tmin", None) is None
+                else float(st.s_tmin)
+            )
+            hi = (
+                sigma_max
+                if getattr(st, "s_tmax", None) is None
+                else float(st.s_tmax)
+            )
             return _finalize(lo, hi)
 
         if window_mode == "entropy_cdf":
@@ -770,19 +881,35 @@ class SigmaSchedule:
                 return _finalize(sigma_min, sigma_max)
 
             if fallback == "fixed":
-                lo = sigma_min if getattr(st, "s_tmin", None) is None else float(st.s_tmin)
-                hi = sigma_max if getattr(st, "s_tmax", None) is None else float(st.s_tmax)
+                lo = (
+                    sigma_min
+                    if getattr(st, "s_tmin", None) is None
+                    else float(st.s_tmin)
+                )
+                hi = (
+                    sigma_max
+                    if getattr(st, "s_tmax", None) is None
+                    else float(st.s_tmax)
+                )
                 return _finalize(lo, hi)
 
             return _StochasticSamplerCfg(enabled=False)
 
-        raise ValueError(f"Unknown evaluation.stochastic.window_mode='{window_mode}'")
+        raise ValueError(
+            f"Unknown evaluation.stochastic.window_mode='{window_mode}'"
+        )
 
-    def _karras_schedule(self, N: int, sigma_min: float, sigma_max: float) -> torch.Tensor:
+    def _karras_schedule(
+        self, N: int, sigma_min: float, sigma_max: float
+    ) -> torch.Tensor:
         rho = float(getattr(self.cfg.diffusion.continuous, "rho", 7.0))
         if N < 2:
-            return torch.tensor([sigma_max], device=self.device, dtype=torch.float32)
-        t = torch.linspace(0.0, 1.0, N, device=self.device, dtype=torch.float32)
+            return torch.tensor(
+                [sigma_max], device=self.device, dtype=torch.float32
+            )
+        t = torch.linspace(
+            0.0, 1.0, N, device=self.device, dtype=torch.float32
+        )
         inv_rho = 1.0 / rho
         smax = float(sigma_max) ** inv_rho
         smin = float(sigma_min) ** inv_rho
@@ -792,7 +919,9 @@ class SigmaSchedule:
         return sigmas
 
     @staticmethod
-    def _interp1d_monotone(x: torch.Tensor, y: torch.Tensor, xq: torch.Tensor) -> torch.Tensor:
+    def _interp1d_monotone(
+        x: torch.Tensor, y: torch.Tensor, xq: torch.Tensor
+    ) -> torch.Tensor:
         x0 = x[0]
         x1 = x[-1]
         xq_clamped = xq.clamp(min=x0, max=x1)
@@ -819,7 +948,9 @@ class SigmaSchedule:
         F = cdf.to(self.device).float()
 
         if sig.numel() < 2:
-            out = torch.full((N,), float(sigma_max), device=self.device, dtype=torch.float32)
+            out = torch.full(
+                (N,), float(sigma_max), device=self.device, dtype=torch.float32
+            )
             out[-1] = float(sigma_min)
             return out
 
@@ -830,29 +961,43 @@ class SigmaSchedule:
 
         if sigma_min_eff > sigma_max_eff:
             val = float(max(min(sigma_max, table_max), table_min))
-            out = torch.full((N,), val, device=self.device, dtype=torch.float32)
+            out = torch.full(
+                (N,), val, device=self.device, dtype=torch.float32
+            )
             out[-1] = val
             return out
 
-        s_min_t = torch.tensor(sigma_min_eff, device=self.device, dtype=torch.float32)
-        s_max_t = torch.tensor(sigma_max_eff, device=self.device, dtype=torch.float32)
+        s_min_t = torch.tensor(
+            sigma_min_eff, device=self.device, dtype=torch.float32
+        )
+        s_max_t = torch.tensor(
+            sigma_max_eff, device=self.device, dtype=torch.float32
+        )
         F_min = self._interp1d_monotone(sig, F, s_min_t)
         F_max = self._interp1d_monotone(sig, F, s_max_t)
 
         if float((F_max - F_min).abs().item()) < 1e-12:
             lo = torch.log(torch.tensor(sigma_min_eff, device=self.device))
             hi = torch.log(torch.tensor(sigma_max_eff, device=self.device))
-            s_fwd = torch.exp(torch.linspace(lo, hi, N, device=self.device, dtype=torch.float32))
+            s_fwd = torch.exp(
+                torch.linspace(
+                    lo, hi, N, device=self.device, dtype=torch.float32
+                )
+            )
             s = torch.flip(s_fwd, dims=[0])
             s[0] = sigma_max_eff
             s[-1] = sigma_min_eff
             return s
 
-        u = torch.linspace(0.0, 1.0, N, device=self.device, dtype=torch.float32)
+        u = torch.linspace(
+            0.0, 1.0, N, device=self.device, dtype=torch.float32
+        )
         u = F_min + u * (F_max - F_min)
         u = u.clamp(min=F[0].item(), max=1.0 - 1e-7)
 
-        idx = torch.searchsorted(F, u, right=False).clamp(min=1, max=F.numel() - 1)
+        idx = torch.searchsorted(F, u, right=False).clamp(
+            min=1, max=F.numel() - 1
+        )
         F_lo = F[idx - 1]
         F_hi = F[idx]
         s_lo = sig[idx - 1]
@@ -870,15 +1015,17 @@ class SigmaSchedule:
     def prepare(
         self,
         *,
-        schedule: Optional[str] = None,
-        num_steps: Optional[int] = None,
-        entropic_blend_alpha: Optional[float] = None,
-        entropy_run_dir: Optional[Path] = None,
-        sigma_min_override: Optional[float] = None,
-        sigma_max_override: Optional[float] = None,
+        schedule: str | None = None,
+        num_steps: int | None = None,
+        entropic_blend_alpha: float | None = None,
+        entropy_run_dir: Path | None = None,
+        sigma_min_override: float | None = None,
+        sigma_max_override: float | None = None,
     ) -> torch.Tensor:
-        schedule_name = schedule if schedule is not None else getattr(
-            self.cfg.evaluation, "schedule", "karras"
+        schedule_name = (
+            schedule
+            if schedule is not None
+            else getattr(self.cfg.evaluation, "schedule", "karras")
         )
         schedule_name = str(schedule_name).lower()
         N = int(
@@ -902,20 +1049,30 @@ class SigmaSchedule:
             sigma_max, sigma_min = sigma_min, sigma_max
 
         if schedule_name == "karras":
-            return self._karras_schedule(N, sigma_min=sigma_min, sigma_max=sigma_max)
+            return self._karras_schedule(
+                N, sigma_min=sigma_min, sigma_max=sigma_max
+            )
 
         if schedule_name == "entropic":
-            _, cdf, sigmas_base = self._load_entropy_tables(entropy_run_dir=entropy_run_dir)
+            _, cdf, sigmas_base = self._load_entropy_tables(
+                entropy_run_dir=entropy_run_dir
+            )
             if cdf is None or sigmas_base is None:
-                resolved_dir = entropy_run_dir if entropy_run_dir is not None else self._default_entropy_run_dir()
+                resolved_dir = (
+                    entropy_run_dir
+                    if entropy_run_dir is not None
+                    else self._default_entropy_run_dir()
+                )
                 raise FileNotFoundError(
-                    "Entropic schedule was requested but the entropy tables "
-                    "(entropy_pdf.pt, entropy_cdf.pt, entropy_sigmas.pt) are missing.\n"
-                    f"Looked in: {resolved_dir}\n"
-                    "The released LM1B and OWT eval configs point at "
-                    "assets/entropy_tables/<dataset>/, which ships with the repo. "
-                    "If you moved or deleted those files, see the README section "
-                    "'Entropic schedule artefacts' for download/restore instructions."
+                    f"Entropic schedule was requested but the entropy "
+                    f"tables (entropy_pdf.pt, entropy_cdf.pt, "
+                    f"entropy_sigmas.pt) are missing.\nLooked in: "
+                    f"{resolved_dir}\nThe released LM1B and OWT eval "
+                    f"configs point at assets/entropy_tables/<dataset>/, "
+                    f"which ships with the repo. If you moved or deleted "
+                    f"those files, see the README section 'Entropic "
+                    f"schedule artefacts' for download/restore "
+                    f"instructions."
                 )
 
             cdf = cdf.to(self.device).clone().float()
@@ -944,12 +1101,15 @@ class SigmaSchedule:
                 sigmas = (1.0 - blend) * sigmas + blend * karras
             return sigmas
 
-        return self._karras_schedule(N, sigma_min=sigma_min, sigma_max=sigma_max)
+        return self._karras_schedule(
+            N, sigma_min=sigma_min, sigma_max=sigma_max
+        )
 
 
 # -----------------------------------------------------------------------------
 # Heun sampler
 # -----------------------------------------------------------------------------
+
 
 class HeunSampler:
     """
@@ -969,12 +1129,22 @@ class HeunSampler:
         self.cfg = cfg
         self.device = _infer_model_device(model, cfg.device)
         self.sigmas = SigmaSchedule(self.process, self.cfg, self.device)
-        self.sc_enabled = bool(getattr(self.cfg.model, "self_condition", False))
-        self.data_center = float(getattr(self.cfg.diffusion.continuous, "data_center", 0.5))
+        self.sc_enabled = bool(
+            getattr(self.cfg.model, "self_condition", False)
+        )
+        self.data_center = float(
+            getattr(self.cfg.diffusion.continuous, "data_center", 0.5)
+        )
 
-        self.repr_mode = str(getattr(cfg.data, "representation", "binary")).lower()
-        self.is_cont_tokens = (self.repr_mode == "tokens")
-        self.vocab_size = int(getattr(cfg.data, "vocab_size", 1)) if self.is_cont_tokens else 1
+        self.repr_mode = str(
+            getattr(cfg.data, "representation", "binary")
+        ).lower()
+        self.is_cont_tokens = self.repr_mode == "tokens"
+        self.vocab_size = (
+            int(getattr(cfg.data, "vocab_size", 1))
+            if self.is_cont_tokens
+            else 1
+        )
 
     @torch.no_grad()
     def sample(
@@ -982,22 +1152,25 @@ class HeunSampler:
         num_samples: int,
         seq_len: int,
         *,
-        conditioning_prefix_full: Optional[torch.Tensor] = None,
-        cond_prefix_mask: Optional[torch.Tensor] = None,
-        conditioning_prefix: Optional[torch.Tensor] = None,
-        cond_len_bits: Optional[int] = None,
-        guidance_scale: Optional[float] = None,
-        schedule: Optional[str] = None,
-        num_steps: Optional[int] = None,
-        entropic_blend_alpha: Optional[float] = None,
-        entropy_run_dir: Optional[Path] = None,
-        sigma_min_override: Optional[float] = None,
-        sigma_max_override: Optional[float] = None,
+        conditioning_prefix_full: torch.Tensor | None = None,
+        cond_prefix_mask: torch.Tensor | None = None,
+        conditioning_prefix: torch.Tensor | None = None,
+        cond_len_bits: int | None = None,
+        guidance_scale: float | None = None,
+        schedule: str | None = None,
+        num_steps: int | None = None,
+        entropic_blend_alpha: float | None = None,
+        entropy_run_dir: Path | None = None,
+        sigma_min_override: float | None = None,
+        sigma_max_override: float | None = None,
         sc_refresh_mode: str = "refined",
-        ati_eta: Optional[float] = None,
+        ati_eta: float | None = None,
         return_probs: bool = False,
         progress: bool = True,
+        x_init: torch.Tensor | None = None,
+        sigma_start: float | None = None,
     ):
+        """Sample num_samples payloads of seq_len positions."""
         sc_refresh_mode = _normalize_sc_refresh_mode(sc_refresh_mode)
         ati_eta = _resolve_ati_eta(self.cfg, ati_eta)
 
@@ -1012,6 +1185,8 @@ class HeunSampler:
             sigma_min_override=sigma_min_override,
             sigma_max_override=sigma_max_override,
         )
+        if sigma_start is not None:
+            sigmas = truncate_schedule(sigmas, sigma_start)
         stoch_cfg = self.sigmas.resolve_stochastic_cfg(
             entropy_run_dir=entropy_run_dir,
             sigma_min_override=sigma_min_override,
@@ -1019,32 +1194,65 @@ class HeunSampler:
         )
         sigma0 = sigmas[0]
 
-        cond_enabled, prefix_full, prefix_mask, null_full = _build_mask_conditioning(
-            cfg=self.cfg,
-            B=B,
-            S=S,
-            device=self.device,
-            conditioning_prefix_full=conditioning_prefix_full,
-            cond_prefix_mask=cond_prefix_mask,
-            conditioning_prefix=conditioning_prefix,
-            cond_len_bits=cond_len_bits,
-            is_cont_tokens=self.is_cont_tokens,
-            vocab_size=self.vocab_size,
+        cond_enabled, prefix_full, prefix_mask, null_full = (
+            _build_mask_conditioning(
+                cfg=self.cfg,
+                B=B,
+                S=S,
+                device=self.device,
+                conditioning_prefix_full=conditioning_prefix_full,
+                cond_prefix_mask=cond_prefix_mask,
+                conditioning_prefix=conditioning_prefix,
+                cond_len_bits=cond_len_bits,
+                is_cont_tokens=self.is_cont_tokens,
+                vocab_size=self.vocab_size,
+            )
         )
 
         use_cfg = False
         if guidance_scale is None:
             guidance_scale = float(
-                getattr(getattr(self.cfg, "evaluation", object()), "guidance_scale", 0.0)
+                getattr(
+                    getattr(self.cfg, "evaluation", object()),
+                    "guidance_scale",
+                    0.0,
+                )
             )
         guidance_scale = float(guidance_scale)
         use_cfg = bool(cond_enabled and (guidance_scale > 0.0))
 
-        if self.is_cont_tokens:
-            x = torch.randn(B, S, self.vocab_size, device=self.device, dtype=torch.float32) * sigma0
+        if x_init is not None:
+            # SDEdit start: corrupt the given CLEAN payload to sigma0
+            # instead of discarding it. x_init already carries the data
+            # centre, so unlike the pure-noise branches it must not be
+            # re-centred.
+            x0_clean = x_init.to(device=self.device, dtype=torch.float32)
+            if x0_clean.shape[0] == 1 and B > 1:
+                x0_clean = x0_clean.expand(B, *x0_clean.shape[1:]).contiguous()
+            if x0_clean.shape[0] != B:
+                raise ValueError(
+                    f"x_init batch {x0_clean.shape[0]} does not match "
+                    f"num_samples {B}"
+                )
+            x = x0_clean + torch.randn_like(x0_clean) * sigma0
+        elif self.is_cont_tokens:
+            x = (
+                torch.randn(
+                    B,
+                    S,
+                    self.vocab_size,
+                    device=self.device,
+                    dtype=torch.float32,
+                )
+                * sigma0
+            )
+            x = x + self.data_center
         else:
-            x = torch.randn(B, S, device=self.device, dtype=torch.float32) * sigma0
-        x = x + self.data_center
+            x = (
+                torch.randn(B, S, device=self.device, dtype=torch.float32)
+                * sigma0
+            )
+            x = x + self.data_center
 
         if cond_enabled:
             _clamp_mask_(x, prefix_full, prefix_mask)
@@ -1075,17 +1283,21 @@ class HeunSampler:
                 _clamp_mask_(x, prefix_full, prefix_mask)
 
             # ------------------------------------------------------------
-            # Optional EDM-style stochastic churn:
-            # move from (x, sigma_cur) to (x_state, sigma_state=sigma_hat),
-            # then evaluate the denoiser at that perturbed state.
+            # Optional EDM-style stochastic churn: move from (x,
+            # sigma_cur) to (x_state, sigma_state=sigma_hat), then
+            # evaluate the denoiser at that perturbed state.
             # ------------------------------------------------------------
-            gamma_i = _compute_edm_gamma(
-                sigma_cur,
-                num_intervals=max(1, len(sigmas) - 1),
-                s_churn=stoch_cfg.s_churn,
-                s_tmin=stoch_cfg.s_tmin,
-                s_tmax=stoch_cfg.s_tmax,
-            ) if stoch_cfg.enabled else 0.0
+            gamma_i = (
+                _compute_edm_gamma(
+                    sigma_cur,
+                    num_intervals=max(1, len(sigmas) - 1),
+                    s_churn=stoch_cfg.s_churn,
+                    s_tmin=stoch_cfg.s_tmin,
+                    s_tmax=stoch_cfg.s_tmax,
+                )
+                if stoch_cfg.enabled
+                else 0.0
+            )
 
             x_state, sigma_state = _apply_edm_churn(
                 x,
@@ -1097,8 +1309,12 @@ class HeunSampler:
             if cond_enabled:
                 _clamp_mask_(x_state, prefix_full, prefix_mask)
 
-            sigma_eval_cur = _ati_shift_sigma_label(sigma_state, sigma_prev, ati_eta)
-            sigma_eval_next = _ati_shift_sigma_label(sigma_next, sigma_state, ati_eta)
+            sigma_eval_cur = _ati_shift_sigma_label(
+                sigma_state, sigma_prev, ati_eta
+            )
+            sigma_eval_next = _ati_shift_sigma_label(
+                sigma_next, sigma_state, ati_eta
+            )
             h = sigma_next - sigma_state
 
             # ------------------------------------------------------------
@@ -1118,7 +1334,9 @@ class HeunSampler:
                 else:
                     cond_cat = torch.zeros_like(x_cat)
 
-                logits_cat = _model_logits_continuous(self.model, self.cfg, x_cat, sig_cat, cond_cat)
+                logits_cat = _model_logits_continuous(
+                    self.model, self.cfg, x_cat, sig_cat, cond_cat
+                )
                 probs_c = logits_to_x0_hat(
                     logits_cat[:B],
                     dtype=x.dtype,
@@ -1151,14 +1369,18 @@ class HeunSampler:
 
             else:
                 sig_B = sigma_eval_cur.expand(B)
-                cond_in = x0_hat if self.sc_enabled else torch.zeros_like(x_state)
+                cond_in = (
+                    x0_hat if self.sc_enabled else torch.zeros_like(x_state)
+                )
 
                 if cond_enabled:
                     _clamp_mask_(x_state, prefix_full, prefix_mask)
                     if self.sc_enabled:
                         _clamp_mask_(cond_in, prefix_full, prefix_mask)
 
-                logits = _model_logits_continuous(self.model, self.cfg, x_state, sig_B, cond_in)
+                logits = _model_logits_continuous(
+                    self.model, self.cfg, x_state, sig_B, cond_in
+                )
                 probs = logits_to_x0_hat(
                     logits,
                     dtype=x.dtype,
@@ -1236,14 +1458,18 @@ class HeunSampler:
 
             else:
                 sig_next_B = sigma_eval_next.expand(B)
-                cond2 = x0_hat_cur if self.sc_enabled else torch.zeros_like(x_pred)
+                cond2 = (
+                    x0_hat_cur if self.sc_enabled else torch.zeros_like(x_pred)
+                )
 
                 if cond_enabled:
                     _clamp_mask_(x_pred, prefix_full, prefix_mask)
                     if self.sc_enabled:
                         _clamp_mask_(cond2, prefix_full, prefix_mask)
 
-                logits2 = _model_logits_continuous(self.model, self.cfg, x_pred, sig_next_B, cond2)
+                logits2 = _model_logits_continuous(
+                    self.model, self.cfg, x_pred, sig_next_B, cond2
+                )
                 probs2 = logits_to_x0_hat(
                     logits2,
                     dtype=x.dtype,
@@ -1278,8 +1504,12 @@ class HeunSampler:
                         _clamp_mask_(x_ref_cat[:B], prefix_full, prefix_mask)
                         _clamp_mask_(x_ref_cat[B:], null_full, prefix_mask)
 
-                        cond_ref_cat = torch.cat([x0_hat_cur_c, x0_hat_cur_u], dim=0)
-                        _clamp_mask_(cond_ref_cat[:B], prefix_full, prefix_mask)
+                        cond_ref_cat = torch.cat(
+                            [x0_hat_cur_c, x0_hat_cur_u], dim=0
+                        )
+                        _clamp_mask_(
+                            cond_ref_cat[:B], prefix_full, prefix_mask
+                        )
                         _clamp_mask_(cond_ref_cat[B:], null_full, prefix_mask)
 
                         logits_ref_cat = _model_logits_continuous(
@@ -1402,9 +1632,9 @@ class HeunSampler:
             return x, probs
 
         # ------------------------------------------------------------
-        # Token-only generation fix:
-        # decode tokens from the final denoised categorical distribution,
-        # not from the noisy continuous state x.
+        # Token-only generation fix: decode tokens from the final
+        # denoised categorical distribution, not from the noisy
+        # continuous state x.
         # ------------------------------------------------------------
         if self.is_cont_tokens:
             sigma_final = _ati_shift_sigma_label(
@@ -1479,8 +1709,8 @@ class HeunSampler:
 
             if probs_out.dim() != 3:
                 raise RuntimeError(
-                    f"Expected final continuous-token probabilities [B,S,V], "
-                    f"got {tuple(probs_out.shape)}"
+                    f"Expected final continuous-token probabilities "
+                    f"[B,S,V], got {tuple(probs_out.shape)}"
                 )
 
             return probs_out.argmax(dim=-1)
@@ -1492,6 +1722,7 @@ class HeunSampler:
 # -----------------------------------------------------------------------------
 # DDIM sampler
 # -----------------------------------------------------------------------------
+
 
 class DDIMSampler:
     """
@@ -1511,20 +1742,32 @@ class DDIMSampler:
         self.cfg = cfg
         self.device = _infer_model_device(model, cfg.device)
         self.sigmas = SigmaSchedule(self.process, self.cfg, self.device)
-        self.sc_enabled = bool(getattr(self.cfg.model, "self_condition", False))
+        self.sc_enabled = bool(
+            getattr(self.cfg.model, "self_condition", False)
+        )
 
         data_center = 0.5
         try:
             data_center = float(
-                getattr(getattr(self.cfg.diffusion, "continuous", object()), "data_center", 0.5)
+                getattr(
+                    getattr(self.cfg.diffusion, "continuous", object()),
+                    "data_center",
+                    0.5,
+                )
             )
         except Exception:
             data_center = 0.5
         self.data_center = float(data_center)
 
-        self.repr_mode = str(getattr(cfg.data, "representation", "binary")).lower()
-        self.is_cont_tokens = (self.repr_mode == "tokens")
-        self.vocab_size = int(getattr(cfg.data, "vocab_size", 1)) if self.is_cont_tokens else 1
+        self.repr_mode = str(
+            getattr(cfg.data, "representation", "binary")
+        ).lower()
+        self.is_cont_tokens = self.repr_mode == "tokens"
+        self.vocab_size = (
+            int(getattr(cfg.data, "vocab_size", 1))
+            if self.is_cont_tokens
+            else 1
+        )
 
     @torch.no_grad()
     def sample(
@@ -1532,22 +1775,25 @@ class DDIMSampler:
         num_samples: int,
         seq_len: int,
         *,
-        conditioning_prefix_full: Optional[torch.Tensor] = None,
-        cond_prefix_mask: Optional[torch.Tensor] = None,
-        conditioning_prefix: Optional[torch.Tensor] = None,
-        cond_len_bits: Optional[int] = None,
-        guidance_scale: Optional[float] = None,
-        schedule: Optional[str] = None,
-        num_steps: Optional[int] = None,
-        entropic_blend_alpha: Optional[float] = None,
-        entropy_run_dir: Optional[Path] = None,
-        sigma_min_override: Optional[float] = None,
-        sigma_max_override: Optional[float] = None,
+        conditioning_prefix_full: torch.Tensor | None = None,
+        cond_prefix_mask: torch.Tensor | None = None,
+        conditioning_prefix: torch.Tensor | None = None,
+        cond_len_bits: int | None = None,
+        guidance_scale: float | None = None,
+        schedule: str | None = None,
+        num_steps: int | None = None,
+        entropic_blend_alpha: float | None = None,
+        entropy_run_dir: Path | None = None,
+        sigma_min_override: float | None = None,
+        sigma_max_override: float | None = None,
         sc_refresh_mode: str = "refined",
-        ati_eta: Optional[float] = None,
+        ati_eta: float | None = None,
         return_probs: bool = False,
         progress: bool = True,
+        x_init: torch.Tensor | None = None,
+        sigma_start: float | None = None,
     ):
+        """Sample with CoBit's first-order entropic DDIM solver."""
         sc_refresh_mode = _normalize_sc_refresh_mode(sc_refresh_mode)
         ati_eta = _resolve_ati_eta(self.cfg, ati_eta)
 
@@ -1562,6 +1808,8 @@ class DDIMSampler:
             sigma_min_override=sigma_min_override,
             sigma_max_override=sigma_max_override,
         )
+        if sigma_start is not None:
+            sigmas = truncate_schedule(sigmas, sigma_start)
         stoch_cfg = self.sigmas.resolve_stochastic_cfg(
             entropy_run_dir=entropy_run_dir,
             sigma_min_override=sigma_min_override,
@@ -1569,31 +1817,60 @@ class DDIMSampler:
         )
         sigma0 = sigmas[0]
 
-        cond_enabled, prefix_full, prefix_mask, null_full = _build_mask_conditioning(
-            cfg=self.cfg,
-            B=B,
-            S=S,
-            device=self.device,
-            conditioning_prefix_full=conditioning_prefix_full,
-            cond_prefix_mask=cond_prefix_mask,
-            conditioning_prefix=conditioning_prefix,
-            cond_len_bits=cond_len_bits,
-            is_cont_tokens=self.is_cont_tokens,
-            vocab_size=self.vocab_size,
+        cond_enabled, prefix_full, prefix_mask, null_full = (
+            _build_mask_conditioning(
+                cfg=self.cfg,
+                B=B,
+                S=S,
+                device=self.device,
+                conditioning_prefix_full=conditioning_prefix_full,
+                cond_prefix_mask=cond_prefix_mask,
+                conditioning_prefix=conditioning_prefix,
+                cond_len_bits=cond_len_bits,
+                is_cont_tokens=self.is_cont_tokens,
+                vocab_size=self.vocab_size,
+            )
         )
 
         if guidance_scale is None:
             guidance_scale = float(
-                getattr(getattr(self.cfg, "evaluation", object()), "guidance_scale", 0.0)
+                getattr(
+                    getattr(self.cfg, "evaluation", object()),
+                    "guidance_scale",
+                    0.0,
+                )
             )
         guidance_scale = float(guidance_scale)
         use_cfg = bool(cond_enabled and (guidance_scale > 0.0))
 
-        if self.is_cont_tokens:
-            x = torch.randn(B, S, self.vocab_size, device=self.device, dtype=torch.float32) * sigma0
+        if x_init is not None:
+            x0_clean = x_init.to(device=self.device, dtype=torch.float32)
+            if x0_clean.shape[0] == 1 and B > 1:
+                x0_clean = x0_clean.expand(B, *x0_clean.shape[1:]).contiguous()
+            if x0_clean.shape[0] != B:
+                raise ValueError(
+                    f"x_init batch {x0_clean.shape[0]} does not match "
+                    f"num_samples {B}"
+                )
+            x = x0_clean + torch.randn_like(x0_clean) * sigma0
+        elif self.is_cont_tokens:
+            x = (
+                torch.randn(
+                    B,
+                    S,
+                    self.vocab_size,
+                    device=self.device,
+                    dtype=torch.float32,
+                )
+                * sigma0
+            )
         else:
-            x = torch.randn(B, S, device=self.device, dtype=torch.float32) * sigma0
-        x = x + self.data_center
+            x = (
+                torch.randn(B, S, device=self.device, dtype=torch.float32)
+                * sigma0
+            )
+        if x_init is None:
+            x = x + self.data_center
 
         if cond_enabled:
             _clamp_mask_(x, prefix_full, prefix_mask)
@@ -1624,15 +1901,20 @@ class DDIMSampler:
                 _clamp_mask_(x, prefix_full, prefix_mask)
 
             # ------------------------------------------------------------
-            # Optional EDM-style stochastic churn before the denoiser call.
+            # Optional EDM-style stochastic churn before the denoiser
+            # call.
             # ------------------------------------------------------------
-            gamma_i = _compute_edm_gamma(
-                sigma_cur,
-                num_intervals=max(1, len(sigmas) - 1),
-                s_churn=stoch_cfg.s_churn,
-                s_tmin=stoch_cfg.s_tmin,
-                s_tmax=stoch_cfg.s_tmax,
-            ) if stoch_cfg.enabled else 0.0
+            gamma_i = (
+                _compute_edm_gamma(
+                    sigma_cur,
+                    num_intervals=max(1, len(sigmas) - 1),
+                    s_churn=stoch_cfg.s_churn,
+                    s_tmin=stoch_cfg.s_tmin,
+                    s_tmax=stoch_cfg.s_tmax,
+                )
+                if stoch_cfg.enabled
+                else 0.0
+            )
 
             x_state, sigma_state = _apply_edm_churn(
                 x,
@@ -1644,8 +1926,12 @@ class DDIMSampler:
             if cond_enabled:
                 _clamp_mask_(x_state, prefix_full, prefix_mask)
 
-            sigma_eval_cur = _ati_shift_sigma_label(sigma_state, sigma_prev, ati_eta)
-            sigma_eval_next = _ati_shift_sigma_label(sigma_next, sigma_state, ati_eta)
+            sigma_eval_cur = _ati_shift_sigma_label(
+                sigma_state, sigma_prev, ati_eta
+            )
+            sigma_eval_next = _ati_shift_sigma_label(
+                sigma_next, sigma_state, ati_eta
+            )
             h = sigma_next - sigma_state
 
             # ------------------------------------------------------------
@@ -1665,7 +1951,9 @@ class DDIMSampler:
                 else:
                     cond_cat = torch.zeros_like(x_cat)
 
-                logits_cat = _model_logits_continuous(self.model, self.cfg, x_cat, sig_cat, cond_cat)
+                logits_cat = _model_logits_continuous(
+                    self.model, self.cfg, x_cat, sig_cat, cond_cat
+                )
                 probs_c = logits_to_x0_hat(
                     logits_cat[:B],
                     dtype=x.dtype,
@@ -1709,8 +1997,12 @@ class DDIMSampler:
                         _clamp_mask_(x_ref_cat[:B], prefix_full, prefix_mask)
                         _clamp_mask_(x_ref_cat[B:], null_full, prefix_mask)
 
-                        cond_ref_cat = torch.cat([x0_hat_cur_c, x0_hat_cur_u], dim=0)
-                        _clamp_mask_(cond_ref_cat[:B], prefix_full, prefix_mask)
+                        cond_ref_cat = torch.cat(
+                            [x0_hat_cur_c, x0_hat_cur_u], dim=0
+                        )
+                        _clamp_mask_(
+                            cond_ref_cat[:B], prefix_full, prefix_mask
+                        )
                         _clamp_mask_(cond_ref_cat[B:], null_full, prefix_mask)
 
                         logits_ref_cat = _model_logits_continuous(
@@ -1738,14 +2030,18 @@ class DDIMSampler:
 
             else:
                 sig_B = sigma_eval_cur.expand(B)
-                cond_in = x0_hat if self.sc_enabled else torch.zeros_like(x_state)
+                cond_in = (
+                    x0_hat if self.sc_enabled else torch.zeros_like(x_state)
+                )
 
                 if cond_enabled:
                     _clamp_mask_(x_state, prefix_full, prefix_mask)
                     if self.sc_enabled:
                         _clamp_mask_(cond_in, prefix_full, prefix_mask)
 
-                logits = _model_logits_continuous(self.model, self.cfg, x_state, sig_B, cond_in)
+                logits = _model_logits_continuous(
+                    self.model, self.cfg, x_state, sig_B, cond_in
+                )
                 probs = logits_to_x0_hat(
                     logits,
                     dtype=x.dtype,
@@ -1868,9 +2164,9 @@ class DDIMSampler:
             return x, probs
 
         # ------------------------------------------------------------
-        # Token-only generation fix:
-        # decode tokens from the final denoised categorical distribution,
-        # not from the noisy continuous state x.
+        # Token-only generation fix: decode tokens from the final
+        # denoised categorical distribution, not from the noisy
+        # continuous state x.
         # ------------------------------------------------------------
         if self.is_cont_tokens:
             sigma_final = _ati_shift_sigma_label(
@@ -1945,8 +2241,8 @@ class DDIMSampler:
 
             if probs_out.dim() != 3:
                 raise RuntimeError(
-                    f"Expected final continuous-token probabilities [B,S,V], "
-                    f"got {tuple(probs_out.shape)}"
+                    f"Expected final continuous-token probabilities "
+                    f"[B,S,V], got {tuple(probs_out.shape)}"
                 )
 
             return probs_out.argmax(dim=-1)

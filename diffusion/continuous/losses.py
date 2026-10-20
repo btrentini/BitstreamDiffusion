@@ -1,8 +1,7 @@
-#diffusion/continuous/losses.py
+# diffusion/continuous/losses.py
 from __future__ import annotations
 
 import inspect
-from typing import Optional
 
 import torch
 import torch.nn.functional as F
@@ -11,7 +10,14 @@ try:
     import triton
     import triton.language as tl
 
-    _HAS_TRITON = True
+    # triton ships with torch, so importing it succeeds even on a
+    # machine with no GPU. The @triton.autotune decorator below runs at
+    # import time and touches the driver, which raises "0 active
+    # drivers" on a CPU-only host. Requiring a real CUDA device here
+    # keeps this module importable on the login node, where config
+    # dry-runs, data preparation and the pre-submit checks all need it.
+    # The kernel is only ever used on a GPU anyway.
+    _HAS_TRITON = torch.cuda.is_available()
 except Exception:  # pragma: no cover
     triton = None
     tl = None
@@ -28,6 +34,7 @@ _TOKEN_SM_TRITON_WARNED = False
 # ============================================================================
 # Common weighting
 # ============================================================================
+
 
 def _sigma_weight(cfg, sigma: torch.Tensor, ndim: int) -> torch.Tensor:
     sigma2 = (sigma.to(torch.float32) ** 2).view(-1, *([1] * (ndim - 1)))
@@ -47,14 +54,18 @@ def _sigma_weight(cfg, sigma: torch.Tensor, ndim: int) -> torch.Tensor:
 # Validation helpers
 # ============================================================================
 
-def _validate_token_sm_inputs_flat(logits: torch.Tensor, targets: torch.Tensor) -> None:
+
+def _validate_token_sm_inputs_flat(
+    logits: torch.Tensor, targets: torch.Tensor
+) -> None:
     if logits.dim() != 2:
         raise ValueError(f"Expected logits [N,V], got {tuple(logits.shape)}")
     if targets.dim() != 1:
         raise ValueError(f"Expected targets [N], got {tuple(targets.shape)}")
     if logits.size(0) != targets.size(0):
         raise ValueError(
-            f"logits batch {logits.size(0)} incompatible with targets {targets.size(0)}"
+            f"logits batch {logits.size(0)} incompatible with targets "
+            f"{targets.size(0)}"
         )
     if logits.size(1) <= 0:
         raise ValueError(f"Expected vocab size > 0, got {logits.size(1)}")
@@ -64,11 +75,14 @@ def _validate_token_sm_inputs_flat(logits: torch.Tensor, targets: torch.Tensor) 
         tmax = int(targets.max().item())
         if tmin < 0 or tmax >= logits.size(1):
             raise ValueError(
-                f"targets out of range for vocab size {logits.size(1)}: min={tmin}, max={tmax}"
+                f"targets out of range for vocab size {logits.size(1)}: "
+                f"min={tmin}, max={tmax}"
             )
 
 
-def _validate_token_sm_inputs_batched(logits: torch.Tensor, targets: torch.Tensor) -> None:
+def _validate_token_sm_inputs_batched(
+    logits: torch.Tensor, targets: torch.Tensor
+) -> None:
     if logits.dim() != 3:
         raise ValueError(f"Expected logits [B,S,V], got {tuple(logits.shape)}")
     if targets.dim() != 2:
@@ -77,7 +91,8 @@ def _validate_token_sm_inputs_batched(logits: torch.Tensor, targets: torch.Tenso
     b, s, v = logits.shape
     if targets.shape != (b, s):
         raise ValueError(
-            f"targets shape {tuple(targets.shape)} incompatible with logits {tuple(logits.shape)}"
+            f"targets shape {tuple(targets.shape)} incompatible with "
+            f"logits {tuple(logits.shape)}"
         )
     if v <= 0:
         raise ValueError(f"Expected vocab size > 0, got {v}")
@@ -87,7 +102,8 @@ def _validate_token_sm_inputs_batched(logits: torch.Tensor, targets: torch.Tenso
         tmax = int(targets.max().item())
         if tmin < 0 or tmax >= v:
             raise ValueError(
-                f"targets out of range for vocab size {v}: min={tmin}, max={tmax}"
+                f"targets out of range for vocab size {v}: min={tmin}, "
+                f"max={tmax}"
             )
 
 
@@ -97,7 +113,9 @@ def _prepare_mask_3d(mask: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
     elif mask.dim() == 3:
         mask_ = mask
     else:
-        raise ValueError(f"mask must have dim 2 or 3, got shape {tuple(mask.shape)}")
+        raise ValueError(
+            f"mask must have dim 2 or 3, got shape {tuple(mask.shape)}"
+        )
 
     return mask_.to(dtype=ref.dtype, device=ref.device)
 
@@ -106,8 +124,9 @@ def _prepare_mask_3d(mask: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
 # Exact PyTorch fallback for token score matching / exact metric
 # ============================================================================
 
+
 def _token_sm_squared_error_exact_chunked_flat(
-    logits: torch.Tensor,   # [N, V]
+    logits: torch.Tensor,  # [N, V]
     targets: torch.Tensor,  # [N]
     chunk_size: int = 2048,
 ) -> torch.Tensor:
@@ -129,11 +148,11 @@ def _token_sm_squared_error_exact_chunked_flat(
 
     for start in range(0, v, chunk_size):
         end = min(start + chunk_size, v)
-        chunk = logits_f32[:, start:end]      # [N, C]
-        shifted = chunk - m[:, None]          # [N, C]
-        e = torch.exp(shifted)                # [N, C]
-        Z = Z + e.sum(dim=-1)                 # [N]
-        Q = Q + (e * e).sum(dim=-1)           # [N]
+        chunk = logits_f32[:, start:end]  # [N, C]
+        shifted = chunk - m[:, None]  # [N, C]
+        e = torch.exp(shifted)  # [N, C]
+        Z = Z + e.sum(dim=-1)  # [N]
+        Q = Q + (e * e).sum(dim=-1)  # [N]
 
     denom = Z.clamp_min(1e-30)
     l_c = logits_f32.gather(dim=-1, index=targets[:, None]).squeeze(-1)  # [N]
@@ -146,7 +165,7 @@ def _token_sm_squared_error_exact_chunked_flat(
 
 
 def _token_sm_squared_error_exact_chunked(
-    logits: torch.Tensor,   # [B, S, V]
+    logits: torch.Tensor,  # [B, S, V]
     targets: torch.Tensor,  # [B, S]
     chunk_size: int = 2048,
 ) -> torch.Tensor:
@@ -164,24 +183,28 @@ def _token_sm_squared_error_exact_chunked(
 
 
 def _token_sm_squared_error_naive_flat(
-    logits: torch.Tensor,   # [N, V]
+    logits: torch.Tensor,  # [N, V]
     targets: torch.Tensor,  # [N]
 ) -> torch.Tensor:
     """
-    Naive reference implementation that materializes softmax probabilities
-    and one-hot targets. Useful for testing / benchmarking only.
+    Naive reference implementation that materializes softmax
+    probabilities and one-hot targets. Useful for testing / benchmarking
+    only.
     """
     _validate_token_sm_inputs_flat(logits, targets)
 
     logits_f32 = logits.to(torch.float32)
     probs = torch.softmax(logits_f32, dim=-1)
-    one_hot = F.one_hot(targets.long(), num_classes=logits.size(1)).to(torch.float32)
+    one_hot = F.one_hot(targets.long(), num_classes=logits.size(1)).to(
+        torch.float32
+    )
     return ((probs - one_hot) ** 2).sum(dim=-1)
 
 
 # ============================================================================
 # Triton fused token score-matching kernels
 # ============================================================================
+
 
 def _triton_token_sm_available(x: torch.Tensor) -> bool:
     if not _HAS_TRITON:
@@ -230,13 +253,13 @@ if _HAS_TRITON:
     )
     @triton.jit
     def _token_sm_fwd_kernel(
-        logits_ptr,            # [N, V]
-        targets_ptr,           # [N] int32
-        loss_ptr,              # [N] fp32
-        m_ptr,                 # [N] fp32
-        invz_ptr,              # [N] fp32
-        ssq_ptr,               # [N] fp32
-        stride_logits_row,     # stride in elements
+        logits_ptr,  # [N, V]
+        targets_ptr,  # [N] int32
+        loss_ptr,  # [N] fp32
+        m_ptr,  # [N] fp32
+        invz_ptr,  # [N] fp32
+        ssq_ptr,  # [N] fp32
+        stride_logits_row,  # stride in elements
         V,
         BLOCK_SIZE: tl.constexpr,
     ):
@@ -250,7 +273,9 @@ if _HAS_TRITON:
         for start in range(0, V, BLOCK_SIZE):
             cols = start + offs
             mask = cols < V
-            x = tl.load(row_ptr + cols, mask=mask, other=-float("inf")).to(tl.float32)
+            x = tl.load(row_ptr + cols, mask=mask, other=-float("inf")).to(
+                tl.float32
+            )
             m = tl.maximum(m, tl.max(x, axis=0))
 
         z = 0.0
@@ -258,7 +283,9 @@ if _HAS_TRITON:
         for start in range(0, V, BLOCK_SIZE):
             cols = start + offs
             mask = cols < V
-            x = tl.load(row_ptr + cols, mask=mask, other=-float("inf")).to(tl.float32)
+            x = tl.load(row_ptr + cols, mask=mask, other=-float("inf")).to(
+                tl.float32
+            )
             e = tl.exp(x - m)
             e = tl.where(mask, e, 0.0)
             z += tl.sum(e, axis=0)
@@ -283,15 +310,15 @@ if _HAS_TRITON:
     )
     @triton.jit
     def _token_sm_bwd_kernel(
-        logits_ptr,            # [N, V]
-        targets_ptr,           # [N] int32
-        grad_out_ptr,          # [N] fp32
-        grad_logits_ptr,       # [N, V], same dtype as logits tensor
-        m_ptr,                 # [N] fp32
-        invz_ptr,              # [N] fp32
-        ssq_ptr,               # [N] fp32
-        stride_logits_row,     # stride in elements
-        stride_grad_row,       # stride in elements
+        logits_ptr,  # [N, V]
+        targets_ptr,  # [N] int32
+        grad_out_ptr,  # [N] fp32
+        grad_logits_ptr,  # [N, V], same dtype as logits tensor
+        m_ptr,  # [N] fp32
+        invz_ptr,  # [N] fp32
+        ssq_ptr,  # [N] fp32
+        stride_logits_row,  # stride in elements
+        stride_grad_row,  # stride in elements
         V,
         BLOCK_SIZE: tl.constexpr,
     ):
@@ -314,7 +341,9 @@ if _HAS_TRITON:
             cols = start + offs
             mask = cols < V
 
-            x = tl.load(row_ptr + cols, mask=mask, other=-float("inf")).to(tl.float32)
+            x = tl.load(row_ptr + cols, mask=mask, other=-float("inf")).to(
+                tl.float32
+            )
             pk = tl.exp(x - m) * invz
 
             delta = (cols == target).to(tl.float32)
@@ -328,8 +357,8 @@ if _HAS_TRITON:
 
 class _FusedTokenSMLoss(torch.autograd.Function):
     """
-    CUDA/Triton fast path only.
-    Use _token_sm_loss_flat(...) below for safe dispatch.
+    CUDA/Triton fast path only. Use _token_sm_loss_flat(...) below for
+    safe dispatch.
     """
 
     @staticmethod
@@ -337,7 +366,9 @@ class _FusedTokenSMLoss(torch.autograd.Function):
         _validate_token_sm_inputs_flat(logits_2d, targets_1d)
 
         if not _triton_token_sm_available(logits_2d):
-            raise RuntimeError("_FusedTokenSMLoss called without Triton/CUDA availability")
+            raise RuntimeError(
+                "_FusedTokenSMLoss called without Triton/CUDA availability"
+            )
 
         if not logits_2d.is_contiguous():
             logits_2d = logits_2d.contiguous()
@@ -345,7 +376,9 @@ class _FusedTokenSMLoss(torch.autograd.Function):
         targets_i32 = targets_1d.to(torch.int32).contiguous()
 
         n_rows, V = logits_2d.shape
-        loss = torch.empty((n_rows,), device=logits_2d.device, dtype=torch.float32)
+        loss = torch.empty(
+            (n_rows,), device=logits_2d.device, dtype=torch.float32
+        )
         m = torch.empty_like(loss)
         invz = torch.empty_like(loss)
         ssq = torch.empty_like(loss)
@@ -390,7 +423,7 @@ class _FusedTokenSMLoss(torch.autograd.Function):
 
 
 def _token_sm_loss_flat(
-    logits_2d: torch.Tensor,   # [N, V]
+    logits_2d: torch.Tensor,  # [N, V]
     targets_1d: torch.Tensor,  # [N]
     chunk_size: int = 2048,
 ) -> torch.Tensor:
@@ -398,22 +431,26 @@ def _token_sm_loss_flat(
     Safe dispatcher for differentiable token score-matching:
       - Triton fast path on CUDA
       - exact chunked PyTorch fallback elsewhere
-      - auto-disables Triton path for this process if runtime launch fails
+      - auto-disables Triton path for this process if runtime launch
+      fails
     """
     global _TOKEN_SM_TRITON_DISABLED_RUNTIME, _TOKEN_SM_TRITON_WARNED
 
     _validate_token_sm_inputs_flat(logits_2d, targets_1d)
 
-    if (not _TOKEN_SM_TRITON_DISABLED_RUNTIME) and _triton_token_sm_available(logits_2d):
+    if (not _TOKEN_SM_TRITON_DISABLED_RUNTIME) and _triton_token_sm_available(
+        logits_2d
+    ):
         try:
             return _FusedTokenSMLoss.apply(logits_2d, targets_1d)
         except Exception as e:
             _TOKEN_SM_TRITON_DISABLED_RUNTIME = True
             if not _TOKEN_SM_TRITON_WARNED:
                 print(
-                    "[token_sm] Triton fused path failed at runtime; "
-                    f"disabling it for this process and falling back to exact chunked PyTorch. "
-                    f"Error: {type(e).__name__}: {e}"
+                    f"[token_sm] Triton fused path failed at runtime; "
+                    f"disabling it for this process and falling back to "
+                    f"exact chunked PyTorch. Error: {type(e).__name__}: "
+                    f"{e}"
                 )
                 _TOKEN_SM_TRITON_WARNED = True
 
@@ -426,22 +463,24 @@ def _token_sm_loss_flat(
 
 @torch.no_grad()
 def _token_sm_metric_flat(
-    logits_2d: torch.Tensor,   # [N, V]
+    logits_2d: torch.Tensor,  # [N, V]
     targets_1d: torch.Tensor,  # [N]
     chunk_size: int = 2048,
 ) -> torch.Tensor:
     """
     Exact no-grad metric path for ||softmax(logits)-one_hot(target)||^2.
 
-    Uses the Triton forward kernel when available, otherwise falls back to
-    exact chunked PyTorch. This is ideal for entropy/rate estimation when the
-    optimization loss is CE.
+    Uses the Triton forward kernel when available, otherwise falls back
+    to exact chunked PyTorch. This is ideal for entropy/rate estimation
+    when the optimization loss is CE.
     """
     global _TOKEN_SM_TRITON_DISABLED_RUNTIME, _TOKEN_SM_TRITON_WARNED
 
     _validate_token_sm_inputs_flat(logits_2d, targets_1d)
 
-    if (not _TOKEN_SM_TRITON_DISABLED_RUNTIME) and _triton_token_sm_available(logits_2d):
+    if (not _TOKEN_SM_TRITON_DISABLED_RUNTIME) and _triton_token_sm_available(
+        logits_2d
+    ):
         try:
             if not logits_2d.is_contiguous():
                 logits_2d = logits_2d.contiguous()
@@ -449,7 +488,9 @@ def _token_sm_metric_flat(
             targets_i32 = targets_1d.to(torch.int32).contiguous()
 
             n_rows, V = logits_2d.shape
-            loss = torch.empty((n_rows,), device=logits_2d.device, dtype=torch.float32)
+            loss = torch.empty(
+                (n_rows,), device=logits_2d.device, dtype=torch.float32
+            )
             m = torch.empty_like(loss)
             invz = torch.empty_like(loss)
             ssq = torch.empty_like(loss)
@@ -471,9 +512,10 @@ def _token_sm_metric_flat(
             _TOKEN_SM_TRITON_DISABLED_RUNTIME = True
             if not _TOKEN_SM_TRITON_WARNED:
                 print(
-                    "[token_sm_metric] Triton forward-only metric path failed at runtime; "
-                    f"disabling it for this process and falling back to exact chunked PyTorch. "
-                    f"Error: {type(e).__name__}: {e}"
+                    f"[token_sm_metric] Triton forward-only metric path "
+                    f"failed at runtime; disabling it for this process and"
+                    f" falling back to exact chunked PyTorch. Error: "
+                    f"{type(e).__name__}: {e}"
                 )
                 _TOKEN_SM_TRITON_WARNED = True
 
@@ -492,8 +534,8 @@ def maybe_warmup_token_sm_triton(
     n_rows: int = 4096,
 ) -> bool:
     """
-    Optional one-time warmup/autotune helper.
-    Call once per rank on the actual CUDA compute node before the hot loop.
+    Optional one-time warmup/autotune helper. Call once per rank on the
+    actual CUDA compute node before the hot loop.
     """
     device = torch.device(device)
     if device.type != "cuda":
@@ -504,7 +546,9 @@ def maybe_warmup_token_sm_triton(
         return False
 
     logits = torch.randn((n_rows, vocab_size), device=device, dtype=dtype)
-    targets = torch.randint(0, vocab_size, (n_rows,), device=device, dtype=torch.int64)
+    targets = torch.randint(
+        0, vocab_size, (n_rows,), device=device, dtype=torch.int64
+    )
     _ = _token_sm_metric_flat(logits, targets)
     torch.cuda.synchronize(device)
     return True
@@ -514,26 +558,30 @@ def maybe_warmup_token_sm_triton(
 # Public losses
 # ============================================================================
 
+
 def binary_score_interpolation_loss(
     logits: torch.Tensor,
     x0: torch.Tensor,
     sigma: torch.Tensor,
     cfg,
     return_entropy_metric: bool = False,
-    mask: Optional[torch.Tensor] = None,
+    mask: torch.Tensor | None = None,
 ):
-    """
-    Weighted denoising objective for binary score interpolation.
-    """
+    """Weighted denoising objective for binary score interpolation."""
     loss_type = str(getattr(cfg.train, "loss_type", "binary_ce")).lower()
 
     if logits.dim() == 2:
         logits = logits.unsqueeze(-1)
     elif logits.dim() == 3:
         if logits.size(-1) != 1:
-            raise ValueError(f"Expected logits last dim = 1 if 3D, got {tuple(logits.shape)}")
+            raise ValueError(
+                f"Expected logits last dim = 1 if 3D, got "
+                f"{tuple(logits.shape)}"
+            )
     else:
-        raise ValueError(f"Expected logits dim 2 or 3, got {tuple(logits.shape)}")
+        raise ValueError(
+            f"Expected logits dim 2 or 3, got {tuple(logits.shape)}"
+        )
 
     b = logits.size(0)
     target = x0.view_as(logits).to(torch.float32)
@@ -545,7 +593,9 @@ def binary_score_interpolation_loss(
     if loss_type == "binary_sm":
         per_pos = F.mse_loss(probs, target, reduction="none")
     elif loss_type == "binary_ce":
-        per_pos = F.binary_cross_entropy_with_logits(logits_f32, target, reduction="none")
+        per_pos = F.binary_cross_entropy_with_logits(
+            logits_f32, target, reduction="none"
+        )
     else:
         raise ValueError(f"Unknown loss_type '{loss_type}'")
 
@@ -572,13 +622,176 @@ def binary_score_interpolation_loss(
     return mean_loss, entropy_metric
 
 
+def multimodal_bit_loss(
+    logits: torch.Tensor,  # [B, S, 1] or [B, S]
+    x0: torch.Tensor,  # [B, S] target bits
+    sigma_map: torch.Tensor,  # [B, S] per-bit noise level (0 at non-targets)
+    cfg,
+    seq_target_mask: torch.Tensor,  # [B, S] bool/float, sequence target bits
+    # [B, S] bool/float, structure target bits
+    struct_target_mask: torch.Tensor,
+    lambda_seq: float = 1.0,
+    lambda_struct: float = 1.0,
+    global_normalizer: bool = False,
+):
+    """
+    Equal-modality denoising loss for the 18-bit patch (plan section
+    6.3).
+    """
+    if logits.dim() == 3:
+        if logits.size(-1) != 1:
+            raise ValueError(
+                f"Expected logits last dim = 1 if 3D, got "
+                f"{tuple(logits.shape)}"
+            )
+        logits = logits.squeeze(-1)
+    elif logits.dim() != 2:
+        raise ValueError(
+            f"Expected logits dim 2 or 3, got {tuple(logits.shape)}"
+        )
+
+    target = x0.to(torch.float32)
+    logits_f32 = logits.to(torch.float32)
+    loss_type = str(getattr(cfg.train, "loss_type", "binary_ce")).lower()
+    if loss_type == "binary_sm":
+        per_pos = (torch.sigmoid(logits_f32) - target) ** 2
+    elif loss_type == "binary_ce":
+        per_pos = F.binary_cross_entropy_with_logits(
+            logits_f32, target, reduction="none"
+        )
+    else:
+        raise ValueError(f"Unknown loss_type '{loss_type}'")
+
+    sigma2 = sigma_map.to(torch.float32) ** 2
+    weighting = str(getattr(cfg.train, "loss_weighting", "edm")).lower()
+    sd2 = float(cfg.diffusion.continuous.sigma_data) ** 2
+    if weighting in {"none", "unit", "1"}:
+        weight = torch.ones_like(sigma2)
+    else:
+        positive = sigma2 > 0
+        safe = torch.where(positive, sigma2, torch.ones_like(sigma2))
+        weight = (safe + sd2) / (safe * sd2)
+        weight = torch.where(positive, weight, torch.zeros_like(weight))
+
+    seq_m = seq_target_mask.to(torch.float32)
+    struct_m = struct_target_mask.to(torch.float32)
+
+    distributed = False
+    if global_normalizer:
+        try:
+            import torch.distributed as dist
+
+            distributed = dist.is_available() and dist.is_initialized()
+        except Exception:
+            distributed = False
+
+    # Optional 1B protocol: make an example carrying two active
+    # modalities contribute the same total mass as an example carrying
+    # one. Without this, a joint co-generation example is implicitly
+    # worth two forward/inverse examples even when the configured task
+    # probabilities are equal.
+    normalize_examples = bool(
+        getattr(cfg.train, "normalize_active_modalities_per_example", False)
+    )
+    seq_num_by_example = (weight * per_pos * seq_m).sum(dim=1)
+    struct_num_by_example = (weight * per_pos * struct_m).sum(dim=1)
+    seq_den_by_example = seq_m.sum(dim=1)
+    struct_den_by_example = struct_m.sum(dim=1)
+    active_seq = seq_den_by_example > 0
+    active_struct = struct_den_by_example > 0
+    active_examples = active_seq | active_struct
+
+    if distributed:
+        import torch.distributed as dist
+
+        # One all-reduce for all four scalars keeps this to a single
+        # collective on the hot path.
+        stats = torch.stack(
+            [
+                (weight * per_pos * seq_m).sum(),
+                seq_m.sum(),
+                (weight * per_pos * struct_m).sum(),
+                struct_m.sum(),
+                active_examples.to(torch.float32).sum(),
+            ]
+        )
+        # The gradient must flow through the *local* numerator only: DDP
+        # already averages gradients across ranks, so all-reducing the
+        # numerator inside the graph would double-count. Reduce a
+        # detached copy to get the global denominators and the global
+        # numerator scale, then rebuild the loss from the local
+        # numerator over the global denominator.
+        with torch.no_grad():
+            reduced = stats.detach().clone()
+            dist.all_reduce(reduced, op=dist.ReduceOp.SUM)
+            world = dist.get_world_size()
+        seq_den = reduced[1].clamp_min(1.0)
+        struct_den = reduced[3].clamp_min(1.0)
+        loss_seq = (weight * per_pos * seq_m).sum() * (world / seq_den)
+        loss_struct = (weight * per_pos * struct_m).sum() * (
+            world / struct_den
+        )
+    else:
+
+        def _reduce(m):
+            num = (weight * per_pos * m).sum()
+            den = m.sum().clamp_min(1.0)
+            return num / den
+
+        loss_seq = _reduce(seq_m)
+        loss_struct = _reduce(struct_m)
+
+    if normalize_examples:
+        per_example_seq = seq_num_by_example / seq_den_by_example.clamp_min(
+            1.0
+        )
+        per_example_struct = (
+            struct_num_by_example / struct_den_by_example.clamp_min(1.0)
+        )
+        modality_weight = (
+            lambda_seq * active_seq.to(torch.float32)
+            + lambda_struct * active_struct.to(torch.float32)
+        ).clamp_min(1.0)
+        per_example = (
+            lambda_seq * per_example_seq * active_seq
+            + lambda_struct * per_example_struct * active_struct
+        ) / modality_weight
+        local_total = (per_example * active_examples).sum()
+        if distributed:
+            total = local_total * (world / reduced[4].clamp_min(1.0))
+        else:
+            total = local_total / active_examples.sum().clamp_min(1)
+    else:
+        total = lambda_seq * loss_seq + lambda_struct * loss_struct
+
+    with torch.no_grad():
+        pred = (logits_f32 > 0).to(torch.float32)
+        correct = (pred == target).to(torch.float32)
+        seq_acc = (correct * seq_m).sum() / seq_m.sum().clamp_min(1.0)
+        struct_acc = (correct * struct_m).sum() / struct_m.sum().clamp_min(1.0)
+
+    components = {
+        "loss_seq": loss_seq.detach(),
+        "loss_struct": loss_struct.detach(),
+        "seq_bit_acc": seq_acc.detach(),
+        "struct_bit_acc": struct_acc.detach(),
+        "seq_target_bits": seq_m.sum().detach(),
+        "struct_target_bits": struct_m.sum().detach(),
+        "active_examples": active_examples.sum().detach(),
+        "task_normalization_per_example": torch.as_tensor(
+            float(normalize_examples), device=logits.device
+        ),
+    }
+    return total, components
+
+
 def token_score_interpolation_loss(
     logits: torch.Tensor,
     x0: torch.Tensor,
     sigma: torch.Tensor,
     cfg,
     return_entropy_metric: bool = False,
-    mask: Optional[torch.Tensor] = None,
+    mask: torch.Tensor | None = None,
 ):
     """
     Continuous one-hot token denoising loss.
@@ -589,7 +802,8 @@ def token_score_interpolation_loss(
 
     token_ce path:
       - CE for optimization
-      - exact ||p - e_c||^2 entropy proxy via no-grad Triton/chunked helper
+      - exact ||p - e_c||^2 entropy proxy via no-grad Triton/chunked
+      helper
     """
     _validate_token_sm_inputs_batched(logits, x0)
 
@@ -599,7 +813,9 @@ def token_score_interpolation_loss(
     targets = x0.long()
 
     if loss_type in {"token_sm", "mse"}:
-        chunk_size = max(1, int(getattr(cfg.train, "token_sm_chunk_size", 2048)))
+        chunk_size = max(
+            1, int(getattr(cfg.train, "token_sm_chunk_size", 2048))
+        )
         logits_2d = logits.contiguous().reshape(b * s, v)
         targets_1d = targets.contiguous().reshape(b * s)
 
@@ -609,11 +825,13 @@ def token_score_interpolation_loss(
             chunk_size=chunk_size,
         )  # [B*S]
 
-        sq_err = loss_flat.reshape(b, s)   # [B,S]
-        per_pos = sq_err.unsqueeze(-1)     # [B,S,1]
+        sq_err = loss_flat.reshape(b, s)  # [B,S]
+        per_pos = sq_err.unsqueeze(-1)  # [B,S,1]
 
     elif loss_type in {"token_ce", "ce"}:
-        chunk_size = max(1, int(getattr(cfg.train, "token_sm_chunk_size", 2048)))
+        chunk_size = max(
+            1, int(getattr(cfg.train, "token_sm_chunk_size", 2048))
+        )
         logits_2d = logits.contiguous().reshape(b * s, v)
         targets_1d = targets.contiguous().reshape(b * s)
 

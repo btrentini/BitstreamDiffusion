@@ -1,0 +1,124 @@
+[project]
+name = "bitstream-diffusion"
+version = "0.1.0"
+description = "CoBit diffusion for text and proteins."
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "torch==2.7.1",
+    "torchvision==0.22.1",
+    "numpy==1.26.4",
+    "scipy>=1.11",
+    "tqdm>=4.66",
+    "filelock>=3.13",
+    "ml-collections>=0.1.1",
+    "omegaconf>=2.3",
+    "einops>=0.7",
+    "huggingface-hub>=0.23,<1",
+    "matplotlib>=3.8",
+    "transformers==4.39.2",
+    "tokenizers>=0.15,<0.19",
+    "datasets>=2.19,<3",
+    "accelerate>=0.30,<1",
+    "tensorboard>=2.15",
+    "wandb>=0.28.1",
+    "mauve-text>=0.4.0",
+    "gdown>=5.1",
+    "gensim>=4.3",
+]
+
+[project.optional-dependencies]
+eval = [
+    "pytorch-lightning==2.2.0",
+    "torchmetrics>=1.3",
+    "hydra-core>=1.3,<1.4",
+    "fair-esm==2.0.0",
+    "biopython>=1.83",
+    "biotite>=0.39",
+    "pandas>=2,<3",
+    "scikit-learn>=1.4",
+    "rich>=13",
+    "pyrootutils>=1.0",
+    "python-dotenv>=1.0",
+    "dm-tree>=0.1.8",
+    "e3nn>=0.5,<0.6",
+    "peft==0.11.1",
+    "tmtools>=0.2",
+    "mdtraj>=1.9,<1.11",
+    "sentencepiece>=0.2",
+    "protobuf>=4.25",
+    "pydssp>=0.9",
+]
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.15"]
+
+[tool.uv]
+package = false
+default-groups = []
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[[tool.uv.sources.torch]]
+index = "pytorch-cu126"
+marker = "sys_platform == 'linux' or sys_platform == 'win32'"
+
+[[tool.uv.sources.torchvision]]
+index = "pytorch-cu126"
+marker = "sys_platform == 'linux' or sys_platform == 'win32'"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-p no:cacheprovider"
+
+[tool.ruff]
+line-length = 79
+target-version = "py311"
+extend-exclude = [".trentinium", "external", "datasets", ".venvs"]
+# Check the protein additions and the shared modules they extend.
+include = [
+    "pyproject.toml",
+    "configs/proteins/**/*.py",
+    "data/__init__.py",
+    "data/protein*.py",
+    "data/uniref50*.py",
+    "diffusion/continuous/losses.py",
+    "diffusion/continuous/samplers.py",
+    "evaluation/proteins/**/*.py",
+    "evaluation/utils.py",
+    "evaluation/vlb.py",
+    "models/protein_multimodal.py",
+    "models/sdt.py",
+    "scripts/check_protein_style.py",
+    "scripts/upload_to_hf.py",
+    "scripts/proteins/**/*.py",
+    "tests/**/*.py",
+    "train.py",
+    "trainers/**/*.py",
+    "utils/callbacks/generation.py",
+    "utils/callbacks/offline_entropy_profile.py",
+    "utils/callbacks/vlb_bound.py",
+    "utils/optim.py",
+    "utils/protein_warmstart.py",
+    "utils/schedule_controller.py",
+    "utils/slurm_runtime.py",
+]
+
+[tool.ruff.lint]
+select = [
+    "E", "F", "I", "W", "UP", "B",
+    "D200", "D201", "D202", "D209", "D210", "D211", "D300", "D301",
+]
+ignore = ["E741"]
+
+[tool.ruff.lint.isort]
+known-first-party = [
+    "data", "models", "diffusion", "trainers", "utils", "evaluation",
+    "configs", "scripts", "autoregression",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"scripts/**/*.py" = ["E402"]
+"evaluation/proteins/*.py" = ["E402"]

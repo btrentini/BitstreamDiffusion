@@ -7,35 +7,40 @@ import math
 import warnings
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple, List
+from typing import Any
 
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader, ConcatDataset, Subset, ChainDataset
+from torch.cuda.amp import autocast
+from torch.utils.data import (
+    ChainDataset,
+    ConcatDataset,
+    DataLoader,
+    Dataset,
+    Subset,
+)
 
 from data import get_loader
-from utils.ema import EMA
-from torch.cuda.amp import autocast
 
 # Continuous
 from diffusion.continuous.processes import ContinuousForwardProcess
-from diffusion.continuous.samplers import HeunSampler, DDIMSampler
+from diffusion.continuous.samplers import DDIMSampler, HeunSampler
 
 # Discrete
-from diffusion.discrete.processes import DiscreteForwardProcess
-from diffusion.discrete.samplers import TweedieTauLeapingSampler, EulerRateSampler
-
 from evaluation.distributed import (
-    get_rank_world_size,
-    shard_count,
     all_gather_int,
     broadcast_optional_tensor,
     gather_varlen_firstdim_to_rank0,
+    get_rank_world_size,
+    shard_count,
 )
+from utils.ema import EMA
 
-import torch.distributed as dist
 
-def resolve_eval_amp(device: torch.device, cfg: Optional[Any] = None) -> Tuple[bool, torch.dtype]:
+def resolve_eval_amp(
+    device: torch.device, cfg: Any | None = None
+) -> tuple[bool, torch.dtype]:
     """
     Resolve AMP settings for eval sampling.
     Priority:
@@ -54,22 +59,30 @@ def resolve_eval_amp(device: torch.device, cfg: Optional[Any] = None) -> Tuple[b
     if cfg is not None and hasattr(cfg, "evaluation"):
         ev = cfg.evaluation
         if hasattr(ev, "use_amp"):
-            use_amp = bool(getattr(ev, "use_amp"))
+            use_amp = bool(ev.use_amp)
         if hasattr(ev, "amp_dtype"):
-            amp_dtype_str = str(getattr(ev, "amp_dtype")).lower()
+            amp_dtype_str = str(ev.amp_dtype).lower()
 
     # ---- 2) training fallback ----
     if cfg is not None and hasattr(cfg, "train"):
         tr = cfg.train
         # only use train flags if eval didn't specify
-        if (cfg is None) or (not hasattr(cfg, "evaluation")) or (not hasattr(cfg.evaluation, "use_amp")):
+        if (
+            (cfg is None)
+            or (not hasattr(cfg, "evaluation"))
+            or (not hasattr(cfg.evaluation, "use_amp"))
+        ):
             if hasattr(tr, "use_fp16"):
-                use_amp = bool(getattr(tr, "use_fp16"))
+                use_amp = bool(tr.use_fp16)
             elif hasattr(tr, "use_amp"):
-                use_amp = bool(getattr(tr, "use_amp"))
-        if (cfg is None) or (not hasattr(cfg, "evaluation")) or (not hasattr(cfg.evaluation, "amp_dtype")):
+                use_amp = bool(tr.use_amp)
+        if (
+            (cfg is None)
+            or (not hasattr(cfg, "evaluation"))
+            or (not hasattr(cfg.evaluation, "amp_dtype"))
+        ):
             if hasattr(tr, "amp_dtype"):
-                amp_dtype_str = str(getattr(tr, "amp_dtype")).lower()
+                amp_dtype_str = str(tr.amp_dtype).lower()
 
     if not use_amp:
         return False, torch.float32
@@ -82,7 +95,9 @@ def resolve_eval_amp(device: torch.device, cfg: Optional[Any] = None) -> Tuple[b
         return False, torch.float32
 
     # auto
-    return True, (torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16)
+    return True, (
+        torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+    )
 
 
 @torch.no_grad()
@@ -93,20 +108,21 @@ def warmup_continuous_sampler(
     seq_len: int,
     num_steps: int,
     schedule: str,
-    entropy_run_dir: Optional[Path],
+    entropy_run_dir: Path | None,
     entropic_blend_alpha: float,
     sigma_min_override: float,
-    sigma_max_override: Optional[float] = None,
+    sigma_max_override: float | None = None,
     device: torch.device,
     use_amp: bool,
     amp_dtype: torch.dtype,
-    cond_kwargs: Optional[dict] = None,
+    cond_kwargs: dict | None = None,
 ) -> None:
     """
     Small-step warmup for torch.compile / kernel caching:
       - Runs sampler.sample with a small batch and few steps.
       - No decoding / logging; return_probs=False.
-      - Passes through sigma_min_override AND sigma_max_override so warmup matches real sampling.
+      - Passes through sigma_min_override AND sigma_max_override so
+      warmup matches real sampling.
     """
     B = int(B)
     if B <= 0:
@@ -124,7 +140,9 @@ def warmup_continuous_sampler(
         torch.cuda.synchronize()
 
     with torch.inference_mode():
-        with torch.autocast(device_type=device.type, enabled=bool(use_amp), dtype=amp_dtype):
+        with torch.autocast(
+            device_type=device.type, enabled=bool(use_amp), dtype=amp_dtype
+        ):
             _ = sampler.sample(
                 B,
                 seq_len,
@@ -133,19 +151,25 @@ def warmup_continuous_sampler(
                 entropic_blend_alpha=float(entropic_blend_alpha),
                 entropy_run_dir=entropy_run_dir,
                 sigma_min_override=float(sigma_min_override),
-                sigma_max_override=(float(sigma_max_override) if sigma_max_override is not None else None),
+                sigma_max_override=(
+                    float(sigma_max_override)
+                    if sigma_max_override is not None
+                    else None
+                ),
                 return_probs=False,
-                progress=False,  # safe if your sampler supports it; remove if it doesn't
+                # safe if your sampler supports it; remove if it doesn't
+                progress=False,
                 **cond_kwargs,
             )
 
     if device.type == "cuda":
         torch.cuda.synchronize()
 
+
 def _tile_rows_to_len(x: torch.Tensor, target: int) -> torch.Tensor:
     """
-    If x has fewer than target rows, repeat rows to reach target.
-    Keeps x[:target] if longer.
+    If x has fewer than target rows, repeat rows to reach target. Keeps
+    x[:target] if longer.
     """
     target = int(target)
     if x.size(0) == target:
@@ -157,14 +181,16 @@ def _tile_rows_to_len(x: torch.Tensor, target: int) -> torch.Tensor:
     reps = (target + x.size(0) - 1) // x.size(0)
     return x.repeat(reps, 1)[:target].contiguous()
 
+
 # -----------------------------------------------------------------------------
 # Small utilities
 # -----------------------------------------------------------------------------
 @contextmanager
 def temp_cfg_overrides(cfg_obj, updates: dict):
     """
-    Temporarily override attributes on a (ml_collections) ConfigDict-like object.
-    Restores old values after the context. If an attribute didn't exist, it is deleted.
+    Temporarily override attributes on a (ml_collections)
+    ConfigDict-like object. Restores old values after the context. If an
+    attribute didn't exist, it is deleted.
     """
     sentinel = object()
     old = {}
@@ -189,7 +215,7 @@ def unwrap_all(model: torch.nn.Module) -> torch.nn.Module:
     m = model
     while True:
         changed = False
-        if hasattr(m, "module"):     # DDP
+        if hasattr(m, "module"):  # DDP
             m = m.module
             changed = True
         if hasattr(m, "_orig_mod"):  # torch.compile
@@ -227,10 +253,16 @@ def load_checkpoint(
         raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
     print(f"Loading checkpoint: {ckpt_path}")
 
-    # Our checkpoints contain non-tensor objects (EMA state, optimizer, etc.) so
-    # weights_only=True would refuse to load them. Released artefacts are
-    # produced by this repo only — we explicitly opt in to full unpickling.
+    # Our checkpoints contain non-tensor objects (EMA state, optimizer,
+    # etc.) so weights_only=True would refuse to load them. Released
+    # artefacts are produced by this repo only — we explicitly opt in to
+    # full unpickling.
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    checkpoint_metadata = {
+        "global_step": int(ckpt.get("global_step", 0)),
+        "epoch": int(ckpt.get("epoch", -1)),
+        "protebit_provenance": ckpt.get("protebit_provenance"),
+    }
 
     model_to_load = unwrap_all(model)
 
@@ -254,6 +286,7 @@ def load_checkpoint(
         print("✓ EMA weights applied.")
     else:
         print("⚠️ No EMA found in checkpoint, using raw weights.")
+    return checkpoint_metadata
 
 
 # -----------------------------------------------------------------------------
@@ -261,7 +294,8 @@ def load_checkpoint(
 # -----------------------------------------------------------------------------
 def resolve_entropy_run_dir(cfg, fid_cfg) -> Path:
     """
-    Decide where the entropy profile (bin edges / pdf) lives for entropic schedule sampling.
+    Decide where the entropy profile (bin edges / pdf) lives for
+    entropic schedule sampling.
     Priority:
       1) cfg.evaluation.fid.entropy_run_dir (if set)
       2) inferred from cfg.evaluation.checkpoint_path
@@ -280,7 +314,12 @@ def make_concat_real_loader_from_splits(cfg_real, splits, *, batch_size=None):
     datasets = [ld.dataset for ld in loaders]
     ds = ConcatDataset(datasets)
 
-    bs = int(batch_size or getattr(cfg_real.evaluation, "num_samples", cfg_real.train.batch_size))
+    bs = int(
+        batch_size
+        or getattr(
+            cfg_real.evaluation, "num_samples", cfg_real.train.batch_size
+        )
+    )
     num_workers = int(getattr(cfg_real.data, "num_workers", 4))
     pin_memory = bool(getattr(cfg_real.data, "pin_memory", True))
     prefetch_factor = getattr(cfg_real.data, "prefetch_factor", None)
@@ -304,7 +343,8 @@ def real_train_loader_for_fid(cfg_real, fid_cfg):
     """
     Returns a loader for the "real TRAIN reference" used in FID.
 
-    Fixes CIFAR-10Bits 'train_size=50000 clamps to 49999' issue without touching dataset:
+    Fixes CIFAR-10Bits 'train_size=50000 clamps to 49999' issue without
+    touching dataset:
       - if you ask for 50000, use train+val concat as real reference.
     """
     real_train_split = None
@@ -316,7 +356,9 @@ def real_train_loader_for_fid(cfg_real, fid_cfg):
     dataset_name = str(getattr(cfg_real.data, "dataset", "")).lower()
     want_n = int(getattr(fid_cfg, "real_train_size", 0) or 0)
 
-    auto_need_concat = (dataset_name in {"cifar10bits", "cifar10"} and want_n >= 50_000)
+    auto_need_concat = (
+        dataset_name in {"cifar10bits", "cifar10"} and want_n >= 50_000
+    )
 
     if real_train_split in {"train+val", "train_val", "trainval"}:
         return make_concat_real_loader_from_splits(cfg_real, ["train", "val"])
@@ -354,6 +396,7 @@ def unwrap_dataset(ds):
         break
     return ds
 
+
 # -----------------------------------------------------------------------------
 # Flatten-order helpers (identical logic)
 # -----------------------------------------------------------------------------
@@ -369,7 +412,8 @@ def collect_real_bit_seqs_for_external_ppl(
     seq_len: int,
 ) -> torch.Tensor:
     """
-    Collect num_samples REAL sequences from `loader` and return [N, seq_len] bits as torch.long in {0,1}.
+    Collect num_samples REAL sequences from `loader` and return [N,
+    seq_len] bits as torch.long in {0,1}.
 
     Supports:
       - Text8 semantic: long bits already in {0,1}
@@ -413,9 +457,13 @@ def collect_real_bit_seqs_for_external_ppl(
             break
 
     if not seqs:
-        raise RuntimeError("Loader yielded no batches; cannot compute real baseline external ppl.")
+        raise RuntimeError(
+            "Loader yielded no batches; cannot compute real baseline "
+            "external ppl."
+        )
 
     return torch.cat(seqs, dim=0)[:num_samples]  # [N, seq_len]
+
 
 @torch.no_grad()
 def seqs_to_images_for_eval(seqs: torch.Tensor, dataset) -> torch.Tensor:
@@ -423,7 +471,8 @@ def seqs_to_images_for_eval(seqs: torch.Tensor, dataset) -> torch.Tensor:
     Convert flattened bit-sequences into images for FID evaluation.
 
     Priority:
-      1) If the underlying dataset implements `reconstruct_from_bits(bits)`,
+      1) If the underlying dataset implements
+      `reconstruct_from_bits(bits)`,
          use that (most correct / supports arbitrary preprocessing).
       2) Otherwise try to reconstruct from generic metadata:
          - shape_hw (H,W)
@@ -431,12 +480,15 @@ def seqs_to_images_for_eval(seqs: torch.Tensor, dataset) -> torch.Tensor:
          - bits_per_pixel (bpp)
          - invperm (pixel permutation inverse, length H*W)
 
-    Accepts `dataset` possibly wrapped in Subset/ConcatDataset/ChainDataset/etc.
+    Accepts `dataset` possibly wrapped in
+    Subset/ConcatDataset/ChainDataset/etc.
     """
     if not isinstance(seqs, torch.Tensor):
         raise TypeError(f"seqs must be a torch.Tensor, got {type(seqs)}")
     if seqs.dim() != 2:
-        raise ValueError(f"seqs must be 2D [B,S], got shape {tuple(seqs.shape)}")
+        raise ValueError(
+            f"seqs must be 2D [B,S], got shape {tuple(seqs.shape)}"
+        )
 
     B, S = seqs.shape  # IMPORTANT: define early, used in shape inference.
 
@@ -456,13 +508,13 @@ def seqs_to_images_for_eval(seqs: torch.Tensor, dataset) -> torch.Tensor:
 
             if not isinstance(img_chw, torch.Tensor):
                 raise TypeError(
-                    "reconstruct_from_bits must return a torch.Tensor, "
+                    f"reconstruct_from_bits must return a torch.Tensor, "
                     f"got {type(img_chw)}"
                 )
             if img_chw.dim() != 3:
                 raise ValueError(
-                    "reconstruct_from_bits must return [C,H,W], "
-                    f"got shape {tuple(img_chw.shape)}"
+                    f"reconstruct_from_bits must return [C,H,W], got shape"
+                    f" {tuple(img_chw.shape)}"
                 )
 
             imgs.append(img_chw.unsqueeze(0))
@@ -481,26 +533,30 @@ def seqs_to_images_for_eval(seqs: torch.Tensor, dataset) -> torch.Tensor:
 
     # If shape is unknown, infer it.
     if shape_hw is None:
-        # If bits_per_pixel is known, infer pixels = S/bpp then H=W=sqrt(pixels).
+        # If bits_per_pixel is known, infer pixels = S/bpp then
+        # H=W=sqrt(pixels).
         if bits_per_pixel is not None and int(bits_per_pixel) > 1:
             bpp = int(bits_per_pixel)
             if S % bpp != 0:
                 raise ValueError(
-                    f"Cannot infer image: sequence_len S={S} not divisible by bits_per_pixel={bpp}"
+                    f"Cannot infer image: sequence_len S={S} not divisible"
+                    f" by bits_per_pixel={bpp}"
                 )
             P = S // bpp  # number of pixels
             H = int(round(math.sqrt(P)))
             if H * H != P:
                 raise ValueError(
-                    f"Cannot infer square image from pixels={P} "
-                    f"(S={S}, bits_per_pixel={bpp})."
+                    f"Cannot infer square image from pixels={P} (S={S}, "
+                    f"bits_per_pixel={bpp})."
                 )
             shape_hw = (H, H)  # fall through to bpp decoding below
         else:
             # true 1-bit-per-pixel square fallback
             H = int(round(math.sqrt(S)))
             if H * H != S:
-                raise ValueError(f"Cannot infer square image from flattened size S={S}.")
+                raise ValueError(
+                    f"Cannot infer square image from flattened size S={S}."
+                )
             inv = torch.arange(S, device=seqs.device, dtype=torch.long)
             imgs = seqs[:, inv].view(B, 1, H, H).to(torch.float32)
             return imgs.clamp(0.0, 1.0)
@@ -515,15 +571,16 @@ def seqs_to_images_for_eval(seqs: torch.Tensor, dataset) -> torch.Tensor:
         inv = invperm.to(seqs.device).view(-1)
         if inv.numel() != num_pixels:
             raise ValueError(
-                f"invperm has length {inv.numel()} but expected H*W={num_pixels} "
-                f"for shape_hw=({H},{W})."
+                f"invperm has length {inv.numel()} but expected H*W="
+                f"{num_pixels} for shape_hw=({H},{W})."
             )
 
     # If bits_per_pixel is unknown or 1, treat as 1-bit grayscale image.
     if bits_per_pixel is None or int(bits_per_pixel) == 1:
         if S != num_pixels:
             raise ValueError(
-                f"Expected S==H*W for 1-bit images, got S={S}, H*W={num_pixels}."
+                f"Expected S==H*W for 1-bit images, got S={S}, H*W="
+                f"{num_pixels}."
             )
         seqs_reordered = seqs[:, inv]
         imgs = seqs_reordered.view(B, 1, H, W).to(torch.float32)
@@ -534,11 +591,13 @@ def seqs_to_images_for_eval(seqs: torch.Tensor, dataset) -> torch.Tensor:
     if S != num_pixels * bpp:
         raise ValueError(
             f"Expected S==H*W*bits_per_pixel, got S={S}, "
-            f"H*W*bits_per_pixel={num_pixels*bpp}."
+            f"H*W*bits_per_pixel={num_pixels * bpp}."
         )
 
     if bpp % channels != 0:
-        raise ValueError(f"bits_per_pixel={bpp} is not divisible by channels={channels}.")
+        raise ValueError(
+            f"bits_per_pixel={bpp} is not divisible by channels={channels}."
+        )
 
     bits_per_channel = bpp // channels
 
@@ -558,7 +617,9 @@ def seqs_to_images_for_eval(seqs: torch.Tensor, dataset) -> torch.Tensor:
     bits = bits.view(B, num_pixels, channels, bits_per_channel)
 
     # pack bits (big-endian within channel)
-    vals = torch.zeros(B, num_pixels, channels, dtype=torch.uint8, device=seqs.device)
+    vals = torch.zeros(
+        B, num_pixels, channels, dtype=torch.uint8, device=seqs.device
+    )
     for k in range(bits_per_channel):
         shift = bits_per_channel - 1 - k
         vals |= (bits[..., k] & 1) << shift
@@ -571,6 +632,7 @@ def seqs_to_images_for_eval(seqs: torch.Tensor, dataset) -> torch.Tensor:
 
 class SeqToImageDataset(Dataset):
     """Wraps flattened sequence dataset -> [C,H,W] images for FID."""
+
     def __init__(self, base_ds):
         super().__init__()
         self.base = base_ds
@@ -617,7 +679,9 @@ def bits_preview(bits_row: torch.Tensor, *, max_bits: int = 128) -> str:
     return f"{s} (len={b.numel()})"
 
 
-def semantic_token_bit_chunks(bits_row: torch.Tensor, *, bits_per_token: int, max_tokens: int = 8) -> str:
+def semantic_token_bit_chunks(
+    bits_row: torch.Tensor, *, bits_per_token: int, max_tokens: int = 8
+) -> str:
     b = bits_row.detach().cpu().to(torch.long).view(-1)
     T = min(max_tokens, b.numel() // bits_per_token)
     chunks = []
@@ -640,9 +704,11 @@ def infer_discrete_seq_len(cfg) -> int:
         return int(cfg.data.sequence_len_tokens)
 
     raise ValueError(
-        "Could not infer discrete sequence length. Please set cfg.data.sequence_len "
-        "(or sequence_len_chars / sequence_len_tokens)."
+        "Could not infer discrete sequence length. Please set "
+        "cfg.data.sequence_len (or sequence_len_chars / "
+        "sequence_len_tokens)."
     )
+
 
 # -----------------------------------------------------------------------------
 # FID warnings helper (kept here so run_eval.py stays short)
@@ -650,18 +716,25 @@ def infer_discrete_seq_len(cfg) -> int:
 def warn_if_small_fid_n(fid_num_samples: int):
     if fid_num_samples < 50_000:
         warnings.warn(
-            f"[FID] Using fid_num_samples={fid_num_samples}. "
-            "Many papers report FID with 50k generated samples; "
-            "smaller N is noisier / not directly comparable."
+            (
+                f"[FID] Using fid_num_samples={fid_num_samples}. Many papers "
+                f"report FID with 50k generated samples; smaller N is noisier "
+                f"/ not directly comparable."
+            ),
+            stacklevel=2,
         )
 
 
 def maybe_override_real_train_size(cfg, fid_cfg):
     cfg_real = cfg
-    if fid_cfg is not None and getattr(fid_cfg, "real_train_size", None) is not None:
+    if (
+        fid_cfg is not None
+        and getattr(fid_cfg, "real_train_size", None) is not None
+    ):
         cfg_real = copy.deepcopy(cfg)
-        cfg_real.data.train_size = int(getattr(fid_cfg, "real_train_size"))
+        cfg_real.data.train_size = int(fid_cfg.real_train_size)
     return cfg_real
+
 
 # -----------------------------------------------------------------------------
 # Conditioning helpers (MUST MATCH callbacks/generation.py)
@@ -674,8 +747,12 @@ def _eval_cond_enabled(cfg) -> bool:
 def _eval_cond_len_bits(cfg, seq_len: int) -> int:
     if not _eval_cond_enabled(cfg):
         return 0
-    bits_per_char = int(getattr(getattr(cfg, "data", object()), "bits_per_char", 1))
-    cond_len_chars = int(getattr(getattr(cfg, "cond", object()), "cond_len_chars", 0))
+    bits_per_char = int(
+        getattr(getattr(cfg, "data", object()), "bits_per_char", 1)
+    )
+    cond_len_chars = int(
+        getattr(getattr(cfg, "cond", object()), "cond_len_chars", 0)
+    )
     cL = int(cond_len_chars * bits_per_char)
     return max(0, min(cL, int(seq_len)))
 
@@ -687,16 +764,17 @@ def _eval_sample_prefixes_from_loader(
     num_samples: int,
     cL: int,
     device: torch.device,
-) -> Optional[torch.Tensor]:
+) -> torch.Tensor | None:
     """
-    Identical logic to GenerationCallback._sample_prefixes_from_data(...)
-    Returns float32 [B,cL] on device, or None.
+    Identical logic to
+    GenerationCallback._sample_prefixes_from_data(...) Returns float32
+    [B,cL] on device, or None.
     """
     B = int(num_samples)
     if loader is None or B <= 0 or cL <= 0:
         return None
 
-    prefixes: List[torch.Tensor] = []
+    prefixes: list[torch.Tensor] = []
     n_collected = 0
 
     for batch in loader:
@@ -715,7 +793,9 @@ def _eval_sample_prefixes_from_loader(
         if batch.size(1) < cL:
             continue
 
-        p = batch[:, :cL].to(device=device, dtype=torch.float32, non_blocking=True)
+        p = batch[:, :cL].to(
+            device=device, dtype=torch.float32, non_blocking=True
+        )
         prefixes.append(p)
         n_collected += p.size(0)
         if n_collected >= B:
@@ -735,15 +815,21 @@ def _eval_entropy_run_dir(cfg) -> Path:
     g = getattr(getattr(cfg, "train", object()), "generation", None)
     ckpt = getattr(g, "entropy_ckpt_path", None) if g is not None else None
     if ckpt is None:
-        ckpt = getattr(getattr(cfg, "evaluation", object()), "checkpoint_path", None)
+        ckpt = getattr(
+            getattr(cfg, "evaluation", object()), "checkpoint_path", None
+        )
     if ckpt is None:
-        raise ValueError("Cannot resolve entropy run dir: missing cfg.train.generation.entropy_ckpt_path and cfg.evaluation.checkpoint_path")
+        raise ValueError(
+            "Cannot resolve entropy run dir: missing "
+            "cfg.train.generation.entropy_ckpt_path and "
+            "cfg.evaluation.checkpoint_path"
+        )
 
     ckpt_path = Path(str(ckpt)).expanduser().resolve()
     return ckpt_path.parent.parent
 
 
-def _eval_guidance_scales(cfg) -> List[float]:
+def _eval_guidance_scales(cfg) -> list[float]:
     """
     Eval-time guidance scales preference:
       1) cfg.evaluation.external_ppl.guidance_scales
@@ -755,8 +841,11 @@ def _eval_guidance_scales(cfg) -> List[float]:
     ev = getattr(cfg, "evaluation", None)
     if ev is not None:
         ext = getattr(ev, "external_ppl", None)
-        if ext is not None and getattr(ext, "guidance_scales", None) is not None:
-            gs = getattr(ext, "guidance_scales")
+        if (
+            ext is not None
+            and getattr(ext, "guidance_scales", None) is not None
+        ):
+            gs = ext.guidance_scales
         else:
             gs = None
     else:
@@ -769,7 +858,11 @@ def _eval_guidance_scales(cfg) -> List[float]:
 
     # 3) last fallback to scalar evaluation.guidance_scale
     if gs is None:
-        v = float(getattr(getattr(cfg, "evaluation", object()), "guidance_scale", 0.0))
+        v = float(
+            getattr(
+                getattr(cfg, "evaluation", object()), "guidance_scale", 0.0
+            )
+        )
         return [v]
 
     # normalize to list[float]
@@ -780,7 +873,7 @@ def _eval_guidance_scales(cfg) -> List[float]:
 
     # dedup
     seen = set()
-    uniq: List[float] = []
+    uniq: list[float] = []
     for v in out:
         if v not in seen:
             uniq.append(v)
@@ -788,18 +881,22 @@ def _eval_guidance_scales(cfg) -> List[float]:
     return uniq
 
 
-def _eval_terminal_sigmas(cfg) -> List[float]:
+def _eval_terminal_sigmas(cfg) -> list[float]:
     """
     Terminal sigma preference:
-      1) cfg.evaluation.external_ppl.terminal_sigmas   (best: external-PPL specific)
-      2) cfg.train.generation.terminal_sigmas          (callback default)
+      1) cfg.evaluation.external_ppl.terminal_sigmas   (best:
+      external-PPL specific)
+      2) cfg.train.generation.terminal_sigmas          (callback
+      default)
       3) cfg.diffusion.continuous.sigma_min
     """
     # 1) evaluation override (external ppl specific)
     ev = getattr(cfg, "evaluation", None)
     if ev is not None:
         ext = getattr(ev, "external_ppl", None)
-        terms = getattr(ext, "terminal_sigmas", None) if ext is not None else None
+        terms = (
+            getattr(ext, "terminal_sigmas", None) if ext is not None else None
+        )
         if terms is not None:
             if isinstance(terms, (list, tuple)):
                 return [float(s) for s in terms]
@@ -814,56 +911,214 @@ def _eval_terminal_sigmas(cfg) -> List[float]:
         return [float(terms)]
 
     # 3) fallback
-    s0 = float(getattr(getattr(cfg.diffusion, "continuous", object()), "sigma_min", 1e-3))
+    s0 = float(
+        getattr(
+            getattr(cfg.diffusion, "continuous", object()), "sigma_min", 1e-3
+        )
+    )
     return [s0]
-
 
 
 def _eval_num_steps(cfg) -> int:
     """
     For external perplexity generation:
-      1) cfg.evaluation.external_ppl.num_sampling_steps   (most specific)
-      2) cfg.train.generation.num_sampling_steps          (matches callback)
+      1) cfg.evaluation.external_ppl.num_sampling_steps   (most
+      specific)
+      2) cfg.train.generation.num_sampling_steps          (matches
+      callback)
       3) cfg.evaluation.num_sampling_steps                (legacy)
       4) fallback 400
     """
     ext = getattr(getattr(cfg, "evaluation", object()), "external_ppl", None)
     if ext is not None and hasattr(ext, "num_sampling_steps"):
-        return int(getattr(ext, "num_sampling_steps"))
+        return int(ext.num_sampling_steps)
 
     g = getattr(getattr(cfg, "train", object()), "generation", None)
     if g is not None and hasattr(g, "num_sampling_steps"):
-        return int(getattr(g, "num_sampling_steps"))
+        return int(g.num_sampling_steps)
 
-    return int(getattr(getattr(cfg, "evaluation", object()), "num_sampling_steps", 400))
+    return int(
+        getattr(
+            getattr(cfg, "evaluation", object()), "num_sampling_steps", 400
+        )
+    )
 
 
 def _eval_entropic_blend_alpha(cfg) -> float:
     g = getattr(getattr(cfg, "train", object()), "generation", None)
     if g is not None and hasattr(g, "entropic_blend_alpha"):
-        return float(getattr(g, "entropic_blend_alpha"))
-    return float(getattr(getattr(cfg, "evaluation", object()), "entropic_blend_alpha", 0.0))
+        return float(g.entropic_blend_alpha)
+    return float(
+        getattr(
+            getattr(cfg, "evaluation", object()), "entropic_blend_alpha", 0.0
+        )
+    )
 
 
 def _bits_from_probs(
     probs: torch.Tensor,
     *,
-    prefix_bits: Optional[torch.Tensor],
+    prefix_bits: torch.Tensor | None,
     cL_bits: int,
     decode_strategy: str = "threshold",
+    codebook_size: int | None = None,
+    bits_per_code: int | None = None,
+    valid_body_codes: list[int] | None = None,
+    bos_code: int | None = None,
+    eos_code: int | None = None,
+    pad_code: int | None = None,
+    min_body_codes: int = 1,
 ) -> torch.Tensor:
-    """
-    EXACT match to GenerationCallback logic:
-      - default is threshold at 0.5
-      - prefix is clamped from prefix_bits, not from the generated sample
-    """
+    """Decode Bernoulli bit probabilities, optionally under a token grammar."""
     decode_strategy = str(decode_strategy).lower()
-    if decode_strategy == "threshold":
+    if decode_strategy in {"argmax_tokens", "token_argmax"}:
+        if probs.dim() != 3:
+            raise ValueError(
+                f"argmax_tokens expects probabilities [B,S,V], got "
+                f"{tuple(probs.shape)}"
+            )
+        bits = probs.argmax(dim=-1).to(torch.long)
+    elif decode_strategy == "threshold":
         bits = (probs > 0.5).to(torch.long)
     elif decode_strategy == "bernoulli":
         bits = torch.bernoulli(probs.clamp(0, 1)).to(torch.long)
+    elif decode_strategy in {
+        "codebook_map",
+        "valid_codebook",
+        "protein_codebook",
+        "protein_grammar_map",
+        "grammar_map",
+    }:
+        if codebook_size is None or bits_per_code is None:
+            raise ValueError(
+                "constrained decoding requires codebook_size and bits_per_code"
+            )
+        codebook_size = int(codebook_size)
+        bits_per_code = int(bits_per_code)
+        if codebook_size <= 0 or codebook_size > (1 << bits_per_code):
+            raise ValueError(
+                f"Invalid codebook_size={codebook_size} for bits_per_code="
+                f"{bits_per_code}"
+            )
+        if probs.dim() != 2 or probs.size(1) % bits_per_code != 0:
+            raise ValueError(
+                f"constrained decoding expects probs [B,S] with S "
+                f"divisible by bits_per_code; got {tuple(probs.shape)}"
+            )
+
+        grouped = (
+            probs.float()
+            .clamp(1e-6, 1.0 - 1e-6)
+            .view(probs.size(0), -1, bits_per_code)
+        )
+        ids = torch.arange(
+            codebook_size, device=probs.device, dtype=torch.long
+        )
+        shifts = torch.arange(
+            bits_per_code - 1, -1, -1, device=probs.device, dtype=torch.long
+        )
+        code_bits = ((ids[:, None] >> shifts[None, :]) & 1).float()
+        cb = code_bits.view(1, 1, codebook_size, bits_per_code)
+        token_scores = (
+            grouped.log().unsqueeze(-2) * cb
+            + torch.log1p(-grouped).unsqueeze(-2) * (1.0 - cb)
+        ).sum(dim=-1)
+
+        if decode_strategy in {"protein_grammar_map", "grammar_map"}:
+            if cL_bits > 0 or prefix_bits is not None:
+                raise ValueError(
+                    "protein grammar MAP currently supports "
+                    "unconditional generation only"
+                )
+            if (
+                not valid_body_codes
+                or bos_code is None
+                or eos_code is None
+                or pad_code is None
+            ):
+                raise ValueError(
+                    "protein grammar MAP requires valid_body_codes, "
+                    "bos_code, eos_code, and pad_code"
+                )
+            body_codes = torch.as_tensor(
+                valid_body_codes, device=probs.device, dtype=torch.long
+            )
+            if bool(torch.any(body_codes < 0)) or bool(
+                torch.any(body_codes >= codebook_size)
+            ):
+                raise ValueError(
+                    "valid_body_codes contains an ID outside the codebook"
+                )
+            for name, code in (
+                ("bos_code", bos_code),
+                ("eos_code", eos_code),
+                ("pad_code", pad_code),
+            ):
+                if not 0 <= int(code) < codebook_size:
+                    raise ValueError(f"{name}={code} is outside the codebook")
+
+            batch_size, num_codes, _ = grouped.shape
+            min_len = int(min_body_codes)
+            max_len = num_codes - 2
+            if min_len < 1 or min_len > max_len:
+                raise ValueError(
+                    f"No legal grammar length: min_body_codes={min_len}, "
+                    f"storage={num_codes}"
+                )
+
+            body_scores, body_choice = token_scores.index_select(
+                -1, body_codes
+            ).max(dim=-1)
+            body_ids = body_codes[body_choice]
+            body_prefix = body_scores[:, 1:].cumsum(dim=1)
+            pad_scores = token_scores[:, :, int(pad_code)]
+            pad_suffix = torch.flip(
+                torch.flip(pad_scores, dims=[1]).cumsum(dim=1), dims=[1]
+            )
+            pad_suffix = torch.cat(
+                [
+                    pad_suffix,
+                    torch.zeros((batch_size, 1), device=probs.device),
+                ],
+                dim=1,
+            )
+            lengths = torch.arange(min_len, max_len + 1, device=probs.device)
+            candidate_scores = (
+                token_scores[:, 0, int(bos_code)].unsqueeze(1)
+                + body_prefix.index_select(1, lengths - 1)
+                + token_scores[:, :, int(eos_code)].index_select(
+                    1, lengths + 1
+                )
+                + pad_suffix.index_select(1, lengths + 2)
+            )
+            best_lengths = lengths[candidate_scores.argmax(dim=1)]
+
+            best_ids = torch.full(
+                (batch_size, num_codes),
+                int(pad_code),
+                device=probs.device,
+                dtype=torch.long,
+            )
+            best_ids[:, 0] = int(bos_code)
+            positions = torch.arange(num_codes, device=probs.device).unsqueeze(
+                0
+            )
+            body_mask = (positions >= 1) & (
+                positions <= best_lengths.unsqueeze(1)
+            )
+            best_ids = torch.where(body_mask, body_ids, best_ids)
+            best_ids.scatter_(
+                1, (best_lengths + 1).unsqueeze(1), int(eos_code)
+            )
+        else:
+            best_ids = token_scores.argmax(dim=-1)
+
+        bits = code_bits[best_ids].to(torch.long).view(probs.size(0), -1)
     else:
-        raise ValueError(f"Unknown decode_strategy='{decode_strategy}' (use 'threshold' or 'bernoulli')")
+        raise ValueError(
+            f"Unknown decode_strategy={decode_strategy!r}; use threshold, "
+            f"bernoulli, codebook_map, or protein_grammar_map"
+        )
 
     if prefix_bits is not None and cL_bits > 0:
         bits[:, :cL_bits] = (prefix_bits[:, :cL_bits] > 0.5).to(torch.long)
@@ -871,21 +1126,22 @@ def _bits_from_probs(
 
 
 # -----------------------------------------------------------------------------
-# Continuous denoiser decoding helper (used by FID decoding for continuous models)
+# Continuous denoiser decoding helper (used by FID decoding for
+# continuous models)
 # -----------------------------------------------------------------------------
 @torch.no_grad()
 def continuous_state_to_bits_via_denoiser(
     *,
     cfg,
     model: torch.nn.Module,
-    x: torch.Tensor,             # [B,S] continuous state
-    sigma_decode: float,         # scalar sigma at which to decode
-    conditioning_prefix: Optional[torch.Tensor] = None,  # [B,cL] float32
+    x: torch.Tensor,  # [B,S] continuous state
+    sigma_decode: float,  # scalar sigma at which to decode
+    conditioning_prefix: torch.Tensor | None = None,  # [B,cL] float32
     cond_len_bits: int = 0,
     guidance_scale: float = 0.0,
     decode: str = "threshold",
-    use_amp: Optional[bool] = None,
-    amp_dtype: Optional[torch.dtype] = None,
+    use_amp: bool | None = None,
+    amp_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
     """
     Decode bits from a continuous state by ONE denoiser call.
@@ -899,43 +1155,60 @@ def continuous_state_to_bits_via_denoiser(
 
     # amp defaults
     if use_amp is None:
-        use_amp = (device.type == "cuda")
+        use_amp = device.type == "cuda"
     if amp_dtype is None:
         amp_dtype = torch.float16
 
     # sigma -> [B]
-    sigma = torch.full((B,), float(sigma_decode), device=device, dtype=torch.float32)
+    sigma = torch.full(
+        (B,), float(sigma_decode), device=device, dtype=torch.float32
+    )
 
     cL = int(cond_len_bits)
     cond_enabled = (conditioning_prefix is not None) and (cL > 0)
     use_cfg = cond_enabled and float(guidance_scale) > 0.0
 
     # Self-conditioning flag (match your training/model API)
-    sc_enabled = bool(getattr(getattr(cfg, "model", object()), "self_condition", False))
+    sc_enabled = bool(
+        getattr(getattr(cfg, "model", object()), "self_condition", False)
+    )
 
-    # Eval-only: we can pass zeros as SC input (samplers may refine internally, but for decoding this is fine)
+    # Eval-only: we can pass zeros as SC input (samplers may refine
+    # internally, but for decoding this is fine)
     x0_hat = torch.zeros_like(x)
 
     decode = str(decode).lower()
     if decode not in {"threshold", "bernoulli"}:
-        raise ValueError(f"decode must be 'threshold' or 'bernoulli' (got {decode})")
+        raise ValueError(
+            f"decode must be 'threshold' or 'bernoulli' (got {decode})"
+        )
 
-    with autocast(enabled=bool(use_amp) and device.type == "cuda", dtype=amp_dtype):
+    with autocast(
+        enabled=bool(use_amp) and device.type == "cuda", dtype=amp_dtype
+    ):
         if use_cfg:
             # Build unconditional "null prefix"
-            null_strategy = str(getattr(getattr(cfg, "cond", object()), "null_strategy", "half")).lower()
+            null_strategy = str(
+                getattr(
+                    getattr(cfg, "cond", object()), "null_strategy", "half"
+                )
+            ).lower()
             if null_strategy == "half":
                 null_prefix = torch.full_like(conditioning_prefix, 0.5)
             elif null_strategy == "zeros":
                 null_prefix = torch.zeros_like(conditioning_prefix)
             elif null_strategy == "random":
-                null_prefix = torch.bernoulli(torch.full_like(conditioning_prefix, 0.5))
+                null_prefix = torch.bernoulli(
+                    torch.full_like(conditioning_prefix, 0.5)
+                )
             else:
-                raise ValueError(f"Unknown cfg.cond.null_strategy={null_strategy}")
+                raise ValueError(
+                    f"Unknown cfg.cond.null_strategy={null_strategy}"
+                )
 
             # Duplicate inputs (cond + uncond)
-            x_cat = torch.cat([x, x], dim=0)                 # [2B,S]
-            sig_cat = sigma.expand(2 * B)                    # [2B]
+            x_cat = torch.cat([x, x], dim=0)  # [2B,S]
+            sig_cat = sigma.expand(2 * B)  # [2B]
 
             # Clamp prefixes into x_cat
             x_cat[:B, :cL] = conditioning_prefix[:, :cL]
@@ -1008,27 +1281,39 @@ def sample_text_sequences_for_external(
     device: torch.device,
     num_samples: int,
     sampler_name: str,
-    data_loader: Optional[Any] = None,
+    data_loader: Any | None = None,
     return_dict: bool = False,
     decode_strategy: str = "threshold",
-    guidance_scales: Optional[List[float]] = None,
-    guidance_scale: Optional[float] = None,
+    codebook_size: int | None = None,
+    bits_per_code: int | None = None,
+    valid_body_codes: list[int] | None = None,
+    bos_code: int | None = None,
+    eos_code: int | None = None,
+    pad_code: int | None = None,
+    min_body_codes: int = 1,
+    guidance_scales: list[float] | None = None,
+    guidance_scale: float | None = None,
     warmup: bool = True,
-    ddp: bool = False,   # ✅ NEW: shard generation + gather to rank0
+    ddp: bool = False,  # ✅ NEW: shard generation + gather to rank0
 ) -> Any:
     """
     External-PPL generation (continuous_score text bitstreams).
 
     IMPORTANT: preserves config semantics:
-      - num_steps from cfg.evaluation.external_ppl.num_sampling_steps (if present)
-      - terminal_sigmas from cfg.evaluation.external_ppl.terminal_sigmas (if present)
-      - guidance_scales from cfg.evaluation.external_ppl.guidance_scales (if present)
+      - num_steps from cfg.evaluation.external_ppl.num_sampling_steps
+      (if present)
+      - terminal_sigmas from cfg.evaluation.external_ppl.terminal_sigmas
+      (if present)
+      - guidance_scales from cfg.evaluation.external_ppl.guidance_scales
+      (if present)
     Falls back only if those fields are missing.
 
     DDP mode (ddp=True + torchrun):
-      - rank0 samples prefix bits for ALL samples, broadcasts to all ranks
+      - rank0 samples prefix bits for ALL samples, broadcasts to all
+      ranks
       - each rank samples its shard of sequences
-      - per tag: gather bits to rank0 (rank0 returns full dict), other ranks return empty dict
+      - per tag: gather bits to rank0 (rank0 returns full dict), other
+      ranks return empty dict
     """
     sampler_name = str(sampler_name).lower()
 
@@ -1039,18 +1324,24 @@ def sample_text_sequences_for_external(
         sampler_name = "ddim_entropic"
 
     want_all = sampler_name in {"all", "sweep", "callback", "both"}
-    sampler_list = ["heun_karras", "ddim_entropic"] if want_all else [sampler_name]
+    sampler_list = (
+        ["heun_karras", "ddim_entropic"] if want_all else [sampler_name]
+    )
 
     if str(getattr(cfg, "framework", "")).lower() != "continuous_score":
-        raise ValueError("sample_text_sequences_for_external supports cfg.framework='continuous_score' only.")
+        raise ValueError(
+            "sample_text_sequences_for_external supports "
+            "cfg.framework='continuous_score' only."
+        )
 
     seq_len = int(getattr(getattr(cfg, "data", object()), "sequence_len", 0))
     if seq_len <= 0:
-        raise ValueError("cfg.data.sequence_len must be set for text generation.")
+        raise ValueError(
+            "cfg.data.sequence_len must be set for text generation."
+        )
 
     # AMP
     use_amp, amp_dtype = resolve_eval_amp(device, cfg=cfg)
-
 
     # Build samplers
     proc = ContinuousForwardProcess(cfg)
@@ -1061,10 +1352,10 @@ def sample_text_sequences_for_external(
     B_total = int(num_samples)
 
     # these are your existing helpers (as in your file)
-    num_steps = _eval_num_steps(cfg)                 # external_ppl priority
+    num_steps = _eval_num_steps(cfg)  # external_ppl priority
     entropic_blend_alpha = _eval_entropic_blend_alpha(cfg)
-    entropy_run_dir = _eval_entropy_run_dir(cfg)     # matches callback
-    terminal_sigmas = _eval_terminal_sigmas(cfg)     # external_ppl priority
+    entropy_run_dir = _eval_entropy_run_dir(cfg)  # matches callback
+    terminal_sigmas = _eval_terminal_sigmas(cfg)  # external_ppl priority
 
     # --- DDP bookkeeping ---
     ddp_active = bool(
@@ -1090,8 +1381,8 @@ def sample_text_sequences_for_external(
     #   - broadcast prefix_total or None to all ranks
     #   - each rank slices its local shard
     # ------------------------------------------------------------
-    prefix_total: Optional[torch.Tensor] = None
-    prefix_local: Optional[torch.Tensor] = None
+    prefix_total: torch.Tensor | None = None
+    prefix_local: torch.Tensor | None = None
     cL = 0
 
     if _eval_cond_enabled(cfg):
@@ -1100,11 +1391,17 @@ def sample_text_sequences_for_external(
     if cL > 0 and data_loader is not None:
         if ddp_active:
             if rank == 0:
-                # sample on rank0 only, then tile to B_total for robustness
-                p = _eval_sample_prefixes_from_loader(data_loader, num_samples=B_total, cL=cL, device=device)
+                # sample on rank0 only, then tile to B_total for
+                # robustness
+                p = _eval_sample_prefixes_from_loader(
+                    data_loader, num_samples=B_total, cL=cL, device=device
+                )
                 if p is not None:
                     if p.dim() != 2 or p.size(1) != cL:
-                        raise ValueError(f"prefix tensor must be [B,cL], got {tuple(p.shape)} (cL={cL})")
+                        raise ValueError(
+                            f"prefix tensor must be [B,cL], got "
+                            f"{tuple(p.shape)} (cL={cL})"
+                        )
                     if p.size(0) != B_total:
                         p = _tile_rows_to_len(p, B_total)
                 prefix_total = p
@@ -1119,13 +1416,18 @@ def sample_text_sequences_for_external(
             )
 
             if prefix_total is not None and B_local > 0:
-                prefix_local = prefix_total[offset : offset + B_local].contiguous()
+                prefix_local = prefix_total[
+                    offset : offset + B_local
+                ].contiguous()
             else:
                 prefix_local = None
                 cL = 0  # ensures unconditional path consistent
         else:
-            # non-DDP: preserve original semantics (NO tiling unless you want it)
-            prefix_local = _eval_sample_prefixes_from_loader(data_loader, num_samples=B_local, cL=cL, device=device)
+            # non-DDP: preserve original semantics (NO tiling unless you
+            # want it)
+            prefix_local = _eval_sample_prefixes_from_loader(
+                data_loader, num_samples=B_local, cL=cL, device=device
+            )
             if prefix_local is None:
                 cL = 0
     else:
@@ -1133,9 +1435,9 @@ def sample_text_sequences_for_external(
         prefix_local = None
 
     # ------------------------------------------------------------
-    # Resolve guidance scales (only meaningful if conditional completion)
-    # Tag set determinism in DDP depends on cL/prefix being identical across ranks.
-    # We ensured that above.
+    # Resolve guidance scales (only meaningful if conditional
+    # completion) Tag set determinism in DDP depends on cL/prefix being
+    # identical across ranks. We ensured that above.
     # ------------------------------------------------------------
     if prefix_local is not None and cL > 0:
         if guidance_scales is not None:
@@ -1158,10 +1460,10 @@ def sample_text_sequences_for_external(
             return ddim, "entropic"
         raise ValueError(f"Unknown sampler '{tag_sampler}'")
 
-    def _one_sample_local(tag_sampler: str, s_term: float, gs: float) -> torch.Tensor:
-        """
-        Returns bits for this rank only: [B_local, seq_len] long on GPU.
-        """
+    def _one_sample_local(
+        tag_sampler: str, s_term: float, gs: float
+    ) -> torch.Tensor:
+        """Returns bits for this rank only: [B_local, seq_len] long on GPU."""
         if B_local <= 0:
             return torch.empty((0, seq_len), device=device, dtype=torch.long)
 
@@ -1176,14 +1478,18 @@ def sample_text_sequences_for_external(
             )
 
         with torch.inference_mode():
-            with torch.autocast(device_type=device.type, enabled=use_amp, dtype=amp_dtype):
+            with torch.autocast(
+                device_type=device.type, enabled=use_amp, dtype=amp_dtype
+            ):
                 _x, probs = sampler.sample(
                     B_local,
                     seq_len,
                     schedule=schedule,
                     num_steps=int(num_steps),
                     entropic_blend_alpha=float(entropic_blend_alpha),
-                    entropy_run_dir=Path(str(entropy_run_dir)) if entropy_run_dir is not None else None,
+                    entropy_run_dir=Path(str(entropy_run_dir))
+                    if entropy_run_dir is not None
+                    else None,
                     sigma_min_override=float(s_term),
                     return_probs=True,
                     **cond_kwargs,
@@ -1194,6 +1500,13 @@ def sample_text_sequences_for_external(
             prefix_bits=prefix_local,
             cL_bits=cL,
             decode_strategy=decode_strategy,
+            codebook_size=codebook_size,
+            bits_per_code=bits_per_code,
+            valid_body_codes=valid_body_codes,
+            bos_code=bos_code,
+            eos_code=eos_code,
+            pad_code=pad_code,
+            min_body_codes=min_body_codes,
         )
         return bits
 
@@ -1228,7 +1541,9 @@ def sample_text_sequences_for_external(
                 device=device,
                 use_amp=use_amp,
                 amp_dtype=amp_dtype,
-                cond_kwargs=cond_kwargs_w if (prefix_local is not None and cL > 0) else None,
+                cond_kwargs=cond_kwargs_w
+                if (prefix_local is not None and cL > 0)
+                else None,
             )
 
     # ------------------------------------------------------------
@@ -1243,20 +1558,29 @@ def sample_text_sequences_for_external(
         if ddp_active:
             bits_all = gather_varlen_firstdim_to_rank0(bits_local, dst=0)
             if rank == 0:
-                return bits_all, (prefix_total if prefix_total is not None else None), cL
+                return (
+                    bits_all,
+                    (prefix_total if prefix_total is not None else None),
+                    cL,
+                )
             return None, None, cL
 
         return bits_local, prefix_local, cL
 
-    out: Dict[str, torch.Tensor] = {}
+    out: dict[str, torch.Tensor] = {}
     for s_term in terminal_sigmas:
         for gs in guidance_scales_final:
             for smp in sampler_list:
-                tag = f"{smp}_term{math.log10(float(s_term)):.2f}_gs{float(gs):g}"
+                tag = (
+                    f"{smp}_term{math.log10(float(s_term)):.2f}_gs"
+                    f"{float(gs):g}"
+                )
                 bits_local = _one_sample_local(smp, float(s_term), float(gs))
 
                 if ddp_active:
-                    bits_all = gather_varlen_firstdim_to_rank0(bits_local, dst=0)
+                    bits_all = gather_varlen_firstdim_to_rank0(
+                        bits_local, dst=0
+                    )
                     if rank == 0:
                         out[tag] = bits_all.detach().cpu()
                 else:
@@ -1264,7 +1588,11 @@ def sample_text_sequences_for_external(
 
     if ddp_active:
         if rank == 0:
-            return out, (prefix_total if prefix_total is not None else None), cL
+            return (
+                out,
+                (prefix_total if prefix_total is not None else None),
+                cL,
+            )
         return {}, None, cL
 
     return out, prefix_local, cL

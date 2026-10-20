@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Optional
 
 import torch
 import torch.nn.functional as F
@@ -17,15 +16,19 @@ from diffusion.continuous.logit_postprocess import _model_logits_continuous
 
 
 # -----------------------------------------------------------------------------
-# Helpers for truncated log-normal importance sampling over y = log(sigma)
+# Helpers for truncated log-normal importance sampling over y =
+# log(sigma)
 # -----------------------------------------------------------------------------
 def _normal_cdf(x: torch.Tensor) -> torch.Tensor:
     return 0.5 * (1.0 + torch.erf(x / math.sqrt(2.0)))
 
 
-def _trunc_normal_logpdf(y: torch.Tensor, *, mu: float, std: float, a: float, b: float) -> torch.Tensor:
+def _trunc_normal_logpdf(
+    y: torch.Tensor, *, mu: float, std: float, a: float, b: float
+) -> torch.Tensor:
     """
-    log q(y) for y ~ Normal(mu,std^2) truncated to [a,b], where y = log(sigma).
+    log q(y) for y ~ Normal(mu,std^2) truncated to [a,b], where y =
+    log(sigma).
     """
     mu_t = torch.tensor(mu, device=y.device, dtype=y.dtype)
     std_t = torch.tensor(std, device=y.device, dtype=y.dtype)
@@ -60,7 +63,13 @@ def _is_master() -> bool:
 # Representation helpers
 # -----------------------------------------------------------------------------
 def _repr_mode(cfg) -> str:
-    return str(getattr(getattr(cfg, "data", object()), "representation", "binary")).lower().strip()
+    return (
+        str(
+            getattr(getattr(cfg, "data", object()), "representation", "binary")
+        )
+        .lower()
+        .strip()
+    )
 
 
 def _is_token_mode(cfg) -> bool:
@@ -80,7 +89,8 @@ def _token_vocab_size(cfg) -> int:
 
 def _cond_len_positions(cfg, S: int) -> int:
     """
-    Return conditional prefix length in the native sequence dimension of the current
+    Return conditional prefix length in the native sequence dimension of
+    the current
     representation:
       - binary mode: number of bit positions
       - token mode: number of token positions
@@ -100,7 +110,9 @@ def _cond_len_positions(cfg, S: int) -> int:
 
         return 0
 
-    bits_per_token = getattr(getattr(cfg, "data", object()), "bits_per_token", None)
+    bits_per_token = getattr(
+        getattr(cfg, "data", object()), "bits_per_token", None
+    )
     if bits_per_token is not None:
         cond_len_tokens = getattr(cond_cfg, "cond_len_tokens", None)
         if cond_len_tokens is not None:
@@ -115,7 +127,11 @@ def _cond_len_positions(cfg, S: int) -> int:
 
 def _make_null_prefix(prefix: torch.Tensor, cfg) -> torch.Tensor:
     cond_cfg = getattr(cfg, "cond", None)
-    strategy = str(getattr(cond_cfg, "null_strategy", "half")) if cond_cfg is not None else "half"
+    strategy = (
+        str(getattr(cond_cfg, "null_strategy", "half"))
+        if cond_cfg is not None
+        else "half"
+    )
     strategy = strategy.lower().strip()
 
     if strategy == "half":
@@ -125,7 +141,13 @@ def _make_null_prefix(prefix: torch.Tensor, cfg) -> torch.Tensor:
     if strategy == "random":
         return torch.bernoulli(torch.full_like(prefix, 0.5))
     if strategy == "data_center":
-        data_center = float(getattr(getattr(cfg.diffusion, "continuous", object()), "data_center", 0.5))
+        data_center = float(
+            getattr(
+                getattr(cfg.diffusion, "continuous", object()),
+                "data_center",
+                0.5,
+            )
+        )
         return torch.full_like(prefix, data_center)
 
     raise ValueError(f"Unknown cfg.cond.null_strategy={strategy}")
@@ -144,15 +166,21 @@ class VLBResult:
     num_examples: int
     S_dim: int
     mode: str
+    num_positions: int
+    position_scope: str
 
 
 def _qstats(name: str, x: torch.Tensor) -> str:
     x = x.detach().float().flatten()
-    qs = torch.quantile(x, torch.tensor([0.0, 0.01, 0.05, 0.5, 0.95, 0.99, 1.0], device=x.device))
+    qs = torch.quantile(
+        x,
+        torch.tensor([0.0, 0.01, 0.05, 0.5, 0.95, 0.99, 1.0], device=x.device),
+    )
     vals = [float(v.item()) for v in qs]
     return (
-        f"{name} q=[min {vals[0]:.4g}, p1 {vals[1]:.4g}, p5 {vals[2]:.4g}, "
-        f"p50 {vals[3]:.4g}, p95 {vals[4]:.4g}, p99 {vals[5]:.4g}, max {vals[6]:.4g}]"
+        f"{name} q=[min {vals[0]:.4g}, p1 {vals[1]:.4g}, p5 {vals[2]:.4g},"
+        f" p50 {vals[3]:.4g}, p95 {vals[4]:.4g}, p99 {vals[5]:.4g}, max "
+        f"{vals[6]:.4g}]"
     )
 
 
@@ -167,18 +195,28 @@ def _bin_means(
     label: str,
 ) -> str:
     nb = max(1, int(nbins))
-    edges = torch.logspace(math.log10(smin), math.log10(smax), steps=nb + 1, device=sig.device)
+    edges = torch.logspace(
+        math.log10(smin), math.log10(smax), steps=nb + 1, device=sig.device
+    )
     out = []
     for i in range(nb):
         lo, hi = edges[i], edges[i + 1]
-        m = (sig >= lo) & (sig < hi) if i < nb - 1 else (sig >= lo) & (sig <= hi)
+        m = (
+            (sig >= lo) & (sig < hi)
+            if i < nb - 1
+            else (sig >= lo) & (sig <= hi)
+        )
         if m.any():
             out.append(
                 f"  bin[{i}] sigma∈[{float(lo):.3g},{float(hi):.3g}]: "
-                f"{label}={float(loss_sum[m].mean().item()):.3g}  {label}/s^2={float(ratio[m].mean().item()):.3g}"
+                f"{label}={float(loss_sum[m].mean().item()):.3g}  {label}"
+                f"/s^2={float(ratio[m].mean().item()):.3g}"
             )
         else:
-            out.append(f"  bin[{i}] sigma∈[{float(lo):.3g},{float(hi):.3g}]: (no samples)")
+            out.append(
+                f"  bin[{i}] sigma∈[{float(lo):.3g},{float(hi):.3g}]: (no "
+                f"samples)"
+            )
     return "\n".join(out)
 
 
@@ -211,14 +249,17 @@ def _dbg_bits(
     uniq_show = uniq[: min(uniq.numel(), 20)].tolist()
 
     print(
-        f"[VLB-DBG] bi={bi} {name}: shape={tuple(xt.shape)} dtype={xt.dtype} device={xt.device} "
-        f"min={mn:.6g} max={mx:.6g} frac<0={frac_lt0:.3g} frac>1={frac_gt1:.3g} frac_not_bit={frac_not_bit:.3g} "
-        f"uniq(sample)={uniq_show}"
+        f"[VLB-DBG] bi={bi} {name}: shape={tuple(xt.shape)} dtype="
+        f"{xt.dtype} device={xt.device} min={mn:.6g} max={mx:.6g} frac<0="
+        f"{frac_lt0:.3g} frac>1={frac_gt1:.3g} frac_not_bit="
+        f"{frac_not_bit:.3g} uniq(sample)={uniq_show}"
     )
 
-    xcpu = xf[: min(B, show_rows), : max_show].cpu()
+    xcpu = xf[: min(B, show_rows), :max_show].cpu()
     for i in range(xcpu.shape[0]):
-        print(f"[VLB-DBG] bi={bi} {name}[{i}][:{max_show}] = {xcpu[i].tolist()}")
+        print(
+            f"[VLB-DBG] bi={bi} {name}[{i}][:{max_show}] = {xcpu[i].tolist()}"
+        )
 
 
 def _dbg_ptr(name: str, x: torch.Tensor, *, bi: int) -> None:
@@ -227,68 +268,78 @@ def _dbg_ptr(name: str, x: torch.Tensor, *, bi: int) -> None:
     except Exception:
         storage_ptr = -1
     print(
-        f"[VLB-DBG-PTR] bi={bi} {name}: data_ptr={x.data_ptr()} storage_ptr={storage_ptr} "
-        f"stride={tuple(x.stride())} contiguous={x.is_contiguous()}"
+        f"[VLB-DBG-PTR] bi={bi} {name}: data_ptr={x.data_ptr()} "
+        f"storage_ptr={storage_ptr} stride={tuple(x.stride())} contiguous="
+        f"{x.is_contiguous()}"
     )
 
 
 # -----------------------------------------------------------------------------
 # Representation-aware losses for VLB estimator
 # -----------------------------------------------------------------------------
-def _recon_term_binary(logits_eval: torch.Tensor, target_eval: torch.Tensor) -> torch.Tensor:
-    return F.binary_cross_entropy_with_logits(
-        logits_eval.float(),
-        target_eval.float(),
-        reduction="none",
-    ).sum(dim=1)
+def _recon_term_binary(
+    logits_eval: torch.Tensor,
+    target_eval: torch.Tensor,
+    mask: torch.Tensor | None = None,
+) -> torch.Tensor:
+    loss = F.binary_cross_entropy_with_logits(
+        logits_eval.float(), target_eval.float(), reduction="none"
+    )
+    if mask is not None:
+        loss = loss * mask.to(device=loss.device, dtype=loss.dtype)
+    return loss.sum(dim=1)
 
 
-def _recon_term_tokens(logits_eval: torch.Tensor, target_ids_eval: torch.Tensor) -> torch.Tensor:
+def _recon_term_tokens(
+    logits_eval: torch.Tensor,
+    target_ids_eval: torch.Tensor,
+    mask: torch.Tensor | None = None,
+) -> torch.Tensor:
     B, S, V = logits_eval.shape
-    ce = F.cross_entropy(
+    loss = F.cross_entropy(
         logits_eval.float().reshape(B * S, V),
         target_ids_eval.long().reshape(B * S),
         reduction="none",
     ).view(B, S)
-    return ce.sum(dim=1)
+    if mask is not None:
+        loss = loss * mask.to(device=loss.device, dtype=loss.dtype)
+    return loss.sum(dim=1)
 
 
-def _diffusion_loss_sum_binary(probs_eval: torch.Tensor, target_eval: torch.Tensor) -> torch.Tensor:
-    return ((probs_eval - target_eval[:, None, :]) ** 2).sum(dim=2)
+def _diffusion_loss_sum_binary(
+    probs_eval: torch.Tensor,
+    target_eval: torch.Tensor,
+    mask: torch.Tensor | None = None,
+) -> torch.Tensor:
+    loss = (probs_eval - target_eval[:, None, :]) ** 2
+    if mask is not None:
+        loss = loss * mask[:, None, :].to(device=loss.device, dtype=loss.dtype)
+    return loss.sum(dim=2)
 
 
-def _diffusion_loss_sum_tokens(probs_eval: torch.Tensor, target_ids_eval: torch.Tensor) -> torch.Tensor:
-    """
-    Compute, for each [B,K], the sum over sequence positions of
-
-        ||p - e_c||^2 = sum_v p_v^2 - 2 p_c + 1
-
-    without materializing one-hot targets.
-
-    Inputs:
-      probs_eval:      [B, K, S, V]
-      target_ids_eval: [B, S]
-
-    Returns:
-      loss_sum:        [B, K]
-    """
+def _diffusion_loss_sum_tokens(
+    probs_eval: torch.Tensor,
+    target_ids_eval: torch.Tensor,
+    mask: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Compute sum_s ||p-e_c||^2 without materializing one-hot targets."""
     if probs_eval.dim() != 4:
-        raise ValueError(f"Expected probs_eval [B,K,S,V], got {tuple(probs_eval.shape)}")
-    if target_ids_eval.dim() != 2:
-        raise ValueError(f"Expected target_ids_eval [B,S], got {tuple(target_ids_eval.shape)}")
-
-    B, K, S, V = probs_eval.shape
+        raise ValueError(
+            f"Expected probs_eval [B,K,S,V], got {tuple(probs_eval.shape)}"
+        )
+    B, K, S, _ = probs_eval.shape
     if target_ids_eval.shape != (B, S):
         raise ValueError(
-            f"target_ids_eval shape {tuple(target_ids_eval.shape)} incompatible with probs_eval {tuple(probs_eval.shape)}"
+            f"Expected target_ids_eval {(B, S)}, got "
+            f"{tuple(target_ids_eval.shape)}"
         )
-
-    sumsq = (probs_eval * probs_eval).sum(dim=-1)
-    gather_idx = target_ids_eval.long().unsqueeze(1).unsqueeze(-1).expand(B, K, S, 1)
+    sumsq = probs_eval.square().sum(dim=-1)
+    gather_idx = target_ids_eval[:, None, :, None].expand(B, K, S, 1)
     p_c = probs_eval.gather(dim=-1, index=gather_idx).squeeze(-1)
-
-    sq_err = sumsq - 2.0 * p_c + 1.0
-    return sq_err.sum(dim=2)
+    loss = sumsq - 2.0 * p_c + 1.0
+    if mask is not None:
+        loss = loss * mask[:, None, :].to(device=loss.device, dtype=loss.dtype)
+    return loss.sum(dim=2)
 
 
 @torch.no_grad()
@@ -298,14 +349,14 @@ def compute_vlb_over_loader(
     cfg,
     data_loader,
     device: torch.device,
-    sigma_min_eval: Optional[float] = None,
-    sigma_max_eval: Optional[float] = None,
+    sigma_min_eval: float | None = None,
+    sigma_max_eval: float | None = None,
     sigma_sampling: str = "log-uniform",
     num_mc_samples_per_batch: int = 1,
     include_prior: bool = False,
     use_amp: bool = True,
     amp_dtype: torch.dtype = torch.float16,
-    max_batches: Optional[int] = None,
+    max_batches: int | None = None,
     progress: bool = True,
     allow_conditional_clean_prefix: bool = True,
     force_unconditional_path: bool = False,
@@ -316,6 +367,7 @@ def compute_vlb_over_loader(
     debug_compare_noise_prefix: bool = True,
     null_prefix_value: float = 0.0,
     null_prefix_mode: str = "constant",
+    position_scope: str = "storage",
 ) -> VLBResult:
     del null_prefix_value, null_prefix_mode  # kept for API compatibility
 
@@ -328,11 +380,17 @@ def compute_vlb_over_loader(
 
     if sigma_min_eval is None:
         sigma_min_eval = float(
-            getattr(getattr(cfg.train, "vlb", object()), "sigma_min_eval", None) or sigma_min_cfg
+            getattr(
+                getattr(cfg.train, "vlb", object()), "sigma_min_eval", None
+            )
+            or sigma_min_cfg
         )
     if sigma_max_eval is None:
         sigma_max_eval = float(
-            getattr(getattr(cfg.train, "vlb", object()), "sigma_max_eval", None) or sigma_max_cfg
+            getattr(
+                getattr(cfg.train, "vlb", object()), "sigma_max_eval", None
+            )
+            or sigma_max_cfg
         )
 
     sigma_min_eval = max(float(sigma_min_eval), 1e-12)
@@ -347,19 +405,29 @@ def compute_vlb_over_loader(
 
     K = max(1, int(num_mc_samples_per_batch))
     sigma_sampling = str(sigma_sampling).lower().strip()
+    position_scope = str(position_scope).lower().strip()
+    if position_scope not in {"storage", "nonpad", "residue"}:
+        raise ValueError(
+            "position_scope must be one of: storage, nonpad, residue"
+        )
 
     sum_prior = torch.zeros((), device=device, dtype=torch.float64)
     sum_recon = torch.zeros((), device=device, dtype=torch.float64)
     sum_diff = torch.zeros((), device=device, dtype=torch.float64)
     sum_count = torch.zeros((), device=device, dtype=torch.float64)
+    sum_positions = torch.zeros((), device=device, dtype=torch.float64)
 
-    S_dim: Optional[int] = None
-    mode_str = "FORCE-UNCOND" if force_unconditional_path else "COND/UNCOND-AUTO"
+    S_dim: int | None = None
+    mode_str = (
+        "FORCE-UNCOND" if force_unconditional_path else "COND/UNCOND-AUTO"
+    )
 
     token_mode = _is_token_mode(cfg)
     binary_mode = _is_binary_mode(cfg)
     if not (token_mode or binary_mode):
-        raise ValueError(f"Unsupported representation for VLB: {_repr_mode(cfg)!r}")
+        raise ValueError(
+            f"Unsupported representation for VLB: {_repr_mode(cfg)!r}"
+        )
 
     # Key patch: state tensors use AMP dtype when enabled.
     state_dtype = amp_dtype if use_amp else torch.float32
@@ -372,6 +440,7 @@ def compute_vlb_over_loader(
     if progress:
         try:
             from tqdm import tqdm
+
             iterator = tqdm(iterator, desc="VLB", leave=True)
         except Exception:
             pass
@@ -382,8 +451,22 @@ def compute_vlb_over_loader(
         if max_batches is not None and bi >= int(max_batches):
             break
 
-        x0 = batch[0] if isinstance(batch, (tuple, list)) else batch
-        x0 = x0.to(device, non_blocking=True)
+        batch_items = batch if isinstance(batch, (tuple, list)) else (batch,)
+        x0 = batch_items[0].to(device, non_blocking=True)
+        if position_scope == "storage":
+            position_mask = None
+        else:
+            mask_index = 1 if position_scope == "nonpad" else 2
+            if len(batch_items) <= mask_index:
+                raise ValueError(
+                    f"position_scope={position_scope!r} requires dataset "
+                    f"mask index {mask_index}"
+                )
+            position_mask = (
+                batch_items[mask_index]
+                .to(device=device, non_blocking=True)
+                .bool()
+            )
 
         B = int(x0.size(0))
         if B <= 0:
@@ -391,12 +474,16 @@ def compute_vlb_over_loader(
 
         if token_mode:
             x0_ids = x0.long().view(B, -1).contiguous()  # [B,S]
-            x0_dense = F.one_hot(x0_ids, num_classes=V).to(dtype=state_dtype)  # [B,S,V]
+            x0_dense = F.one_hot(x0_ids, num_classes=V).to(
+                dtype=state_dtype
+            )  # [B,S,V]
             S_full = int(x0_ids.size(1))
             x0_debug = x0_dense
         else:
             x0_ids = None
-            x0_dense = x0.view(B, -1).to(dtype=torch.float32).contiguous()  # [B,S]
+            x0_dense = (
+                x0.view(B, -1).to(dtype=torch.float32).contiguous()
+            )  # [B,S]
             S_full = int(x0_dense.size(1))
             x0_debug = x0_dense
 
@@ -416,10 +503,22 @@ def compute_vlb_over_loader(
         else:
             cL = _cond_len_positions(cfg, S_full)
             cond_cfg = getattr(cfg, "cond", None)
-            cond_enabled = (cond_cfg is not None) and bool(getattr(cond_cfg, "enabled", False)) and (cL > 0)
-            noise_prefix = bool(getattr(cond_cfg, "noise_prefix", False)) if cond_enabled else True
+            cond_enabled = (
+                (cond_cfg is not None)
+                and bool(getattr(cond_cfg, "enabled", False))
+                and (cL > 0)
+            )
+            noise_prefix = (
+                bool(getattr(cond_cfg, "noise_prefix", False))
+                if cond_enabled
+                else True
+            )
 
-            clean_prefix_mode = bool(allow_conditional_clean_prefix) and cond_enabled and (not noise_prefix)
+            clean_prefix_mode = (
+                bool(allow_conditional_clean_prefix)
+                and cond_enabled
+                and (not noise_prefix)
+            )
 
             if clean_prefix_mode:
                 saw_clean_prefix_mode = True
@@ -432,34 +531,57 @@ def compute_vlb_over_loader(
                 x0_eval_ids = x0_ids
 
         S_eval = int(x0_eval_dense.size(1))
+        if position_mask is None:
+            eval_mask = None
+        else:
+            eval_mask = (
+                position_mask[:, cL:] if clean_prefix_mode else position_mask
+            ).contiguous()
+            if eval_mask.shape != (B, S_eval):
+                raise ValueError(
+                    f"VLB mask shape {tuple(eval_mask.shape)} does not "
+                    f"match {(B, S_eval)}"
+                )
 
         if debug_integrand and bi < int(debug_first_n_batches):
             print(
-                f"[VLB-DBG] bi={bi} mode={mode_str} repr={_repr_mode(cfg)} "
-                f"clean_prefix_mode={clean_prefix_mode} cL={cL} S_full={S_full} S_eval={S_eval}"
+                f"[VLB-DBG] bi={bi} mode={mode_str} repr={_repr_mode(cfg)}"
+                f" clean_prefix_mode={clean_prefix_mode} cL={cL} S_full="
+                f"{S_full} S_eval={S_eval}"
             )
 
         # -----------------------------
         # Prior term (optional)
         # -----------------------------
         if include_prior:
-            prior_per_ex = 0.5 * (x0_eval_dense.float() ** 2).reshape(B, -1).sum(dim=1) / (sigma_max_eval**2)
+            prior_loss = 0.5 * x0_eval_dense.float().square()
+            if token_mode:
+                prior_loss = prior_loss.sum(dim=-1)
+            if eval_mask is not None:
+                prior_loss = prior_loss * eval_mask.to(prior_loss.dtype)
+            prior_per_ex = prior_loss.reshape(B, -1).sum(dim=1) / (
+                sigma_max_eval**2
+            )
         else:
             prior_per_ex = torch.zeros(B, device=device, dtype=torch.float32)
 
         # -----------------------------
         # Recon term at sigma_min_eval
         # -----------------------------
-        sigma0_vec = torch.full((B,), sigma_min_eval, device=device, dtype=torch.float32)
+        sigma0_vec = torch.full(
+            (B,), sigma_min_eval, device=device, dtype=torch.float32
+        )
 
         if clean_prefix_mode:
             x0_target_dense = x0_dense[:, cL:].contiguous()
             x0_target_ids = x0_ids[:, cL:].contiguous() if token_mode else None
 
             z0_suffix = (
-                x0_target_dense + sigma0_vec.view(-1, 1, 1) * torch.randn_like(x0_target_dense)
+                x0_target_dense
+                + sigma0_vec.view(-1, 1, 1) * torch.randn_like(x0_target_dense)
                 if token_mode
-                else x0_target_dense + sigma0_vec.view(-1, 1) * torch.randn_like(x0_target_dense)
+                else x0_target_dense
+                + sigma0_vec.view(-1, 1) * torch.randn_like(x0_target_dense)
             )
 
             z0_in = x0_dense.clone()
@@ -469,40 +591,60 @@ def compute_vlb_over_loader(
             x0_hat0[:, :cL] = prefix
         else:
             x0_target_dense = x0_eval_dense.contiguous().clone()
-            x0_target_ids = x0_eval_ids.contiguous().clone() if token_mode else None
+            x0_target_ids = (
+                x0_eval_ids.contiguous().clone() if token_mode else None
+            )
 
             z0_in = (
-                x0_target_dense + sigma0_vec.view(-1, 1, 1) * torch.randn_like(x0_target_dense)
+                x0_target_dense
+                + sigma0_vec.view(-1, 1, 1) * torch.randn_like(x0_target_dense)
                 if token_mode
-                else x0_target_dense + sigma0_vec.view(-1, 1) * torch.randn_like(x0_target_dense)
+                else x0_target_dense
+                + sigma0_vec.view(-1, 1) * torch.randn_like(x0_target_dense)
             )
             x0_hat0 = torch.zeros_like(z0_in)
 
         with autocast(enabled=use_amp, dtype=amp_dtype):
-            logits0 = _model_logits_continuous(model, cfg, z0_in, sigma0_vec, x0_hat0)
+            logits0 = _model_logits_continuous(
+                model, cfg, z0_in, sigma0_vec, x0_hat0
+            )
             if binary_mode and logits0.dim() == 3 and logits0.size(-1) == 1:
                 logits0 = logits0.squeeze(-1)
 
         logits0_eval = logits0[:, cL:] if clean_prefix_mode else logits0
 
         if token_mode:
-            recon_per_ex = _recon_term_tokens(logits0_eval, x0_target_ids)
+            recon_per_ex = _recon_term_tokens(
+                logits0_eval, x0_target_ids, mask=eval_mask
+            )
         else:
-            recon_per_ex = _recon_term_binary(logits0_eval, x0_target_dense)
+            recon_per_ex = _recon_term_binary(
+                logits0_eval, x0_target_dense, mask=eval_mask
+            )
 
         # -----------------------------
         # Diffusion integral MC estimate over log-sigma
         # -----------------------------
         if ln_range <= 0:
             diff_per_ex = torch.zeros(B, device=device, dtype=torch.float32)
-            sigma = torch.full((B, K), sigma_min_eval, device=device, dtype=torch.float32)
-            inv_qy = torch.full((B, K), ln_range, device=device, dtype=torch.float32)
+            sigma = torch.full(
+                (B, K), sigma_min_eval, device=device, dtype=torch.float32
+            )
+            inv_qy = torch.full(
+                (B, K), ln_range, device=device, dtype=torch.float32
+            )
             loss_sum = torch.zeros((B, K), device=device, dtype=torch.float32)
             ratio = torch.zeros((B, K), device=device, dtype=torch.float32)
         else:
             if sigma_sampling in {"loguniform", "log-uniform", "uniform"}:
-                y = torch.rand(B, K, device=device, dtype=torch.float32) * ln_range + a
-                inv_qy = torch.full((B, K), ln_range, device=device, dtype=torch.float32)
+                y = (
+                    torch.rand(B, K, device=device, dtype=torch.float32)
+                    * ln_range
+                    + a
+                )
+                inv_qy = torch.full(
+                    (B, K), ln_range, device=device, dtype=torch.float32
+                )
             elif sigma_sampling in {"lognormal", "log-normal", "edm"}:
                 y = torch.empty(B, K, device=device, dtype=torch.float32)
                 mask = torch.ones(B, K, device=device, dtype=torch.bool)
@@ -510,7 +652,9 @@ def compute_vlb_over_loader(
                 rounds = 0
                 while mask.any() and rounds < max_rounds:
                     nmask = int(mask.sum().item())
-                    y_prop = mu + std * torch.randn(nmask, device=device, dtype=torch.float32)
+                    y_prop = mu + std * torch.randn(
+                        nmask, device=device, dtype=torch.float32
+                    )
                     ok = (y_prop >= a) & (y_prop <= b)
                     idx = mask.nonzero(as_tuple=False)
                     if ok.any():
@@ -533,33 +677,83 @@ def compute_vlb_over_loader(
 
             if clean_prefix_mode:
                 x0_for_loss_dense = x0_dense[:, cL:].contiguous()
-                x0_for_loss_ids = x0_ids[:, cL:].contiguous() if token_mode else None
+                x0_for_loss_ids = (
+                    x0_ids[:, cL:].contiguous() if token_mode else None
+                )
 
                 if token_mode:
-                    noise = torch.randn(B, K, S_eval, V, device=device, dtype=x0_for_loss_dense.dtype)
-                    zt_suffix = x0_for_loss_dense[:, None, :, :] + sigma[:, :, None, None] * noise
-                    zt = x0_dense[:, None, :, :].expand(B, K, S_full, V).contiguous()
+                    noise = torch.randn(
+                        B,
+                        K,
+                        S_eval,
+                        V,
+                        device=device,
+                        dtype=x0_for_loss_dense.dtype,
+                    )
+                    zt_suffix = (
+                        x0_for_loss_dense[:, None, :, :]
+                        + sigma[:, :, None, None] * noise
+                    )
+                    zt = (
+                        x0_dense[:, None, :, :]
+                        .expand(B, K, S_full, V)
+                        .contiguous()
+                    )
                     zt[:, :, cL:, :] = zt_suffix
                 else:
-                    noise = torch.randn(B, K, S_eval, device=device, dtype=x0_for_loss_dense.dtype)
-                    zt_suffix = x0_for_loss_dense[:, None, :] + sigma[:, :, None] * noise
+                    noise = torch.randn(
+                        B,
+                        K,
+                        S_eval,
+                        device=device,
+                        dtype=x0_for_loss_dense.dtype,
+                    )
+                    zt_suffix = (
+                        x0_for_loss_dense[:, None, :]
+                        + sigma[:, :, None] * noise
+                    )
                     zt = x0_dense[:, None, :].expand(B, K, S_full).contiguous()
                     zt[:, :, cL:] = zt_suffix
             else:
                 x0_for_loss_dense = x0_eval_dense.contiguous().clone()
-                x0_for_loss_ids = x0_eval_ids.contiguous().clone() if token_mode else None
+                x0_for_loss_ids = (
+                    x0_eval_ids.contiguous().clone() if token_mode else None
+                )
 
                 if token_mode:
-                    noise = torch.randn(B, K, S_eval, V, device=device, dtype=x0_for_loss_dense.dtype)
-                    zt = x0_for_loss_dense[:, None, :, :] + sigma[:, :, None, None] * noise
+                    noise = torch.randn(
+                        B,
+                        K,
+                        S_eval,
+                        V,
+                        device=device,
+                        dtype=x0_for_loss_dense.dtype,
+                    )
+                    zt = (
+                        x0_for_loss_dense[:, None, :, :]
+                        + sigma[:, :, None, None] * noise
+                    )
                 else:
-                    noise = torch.randn(B, K, S_eval, device=device, dtype=x0_for_loss_dense.dtype)
-                    zt = x0_for_loss_dense[:, None, :] + sigma[:, :, None] * noise
+                    noise = torch.randn(
+                        B,
+                        K,
+                        S_eval,
+                        device=device,
+                        dtype=x0_for_loss_dense.dtype,
+                    )
+                    zt = (
+                        x0_for_loss_dense[:, None, :]
+                        + sigma[:, :, None] * noise
+                    )
 
             if token_mode:
-                zt_flat = zt.reshape(B * K, S_full if clean_prefix_mode else S_eval, V)
+                zt_flat = zt.reshape(
+                    B * K, S_full if clean_prefix_mode else S_eval, V
+                )
             else:
-                zt_flat = zt.reshape(B * K, S_full if clean_prefix_mode else S_eval)
+                zt_flat = zt.reshape(
+                    B * K, S_full if clean_prefix_mode else S_eval
+                )
 
             sigma_flat = sigma.reshape(B * K)
 
@@ -583,28 +777,42 @@ def compute_vlb_over_loader(
                     x0_hat_flat[:, :cL] = prefix_rep
 
             with autocast(enabled=use_amp, dtype=amp_dtype):
-                logits = _model_logits_continuous(model, cfg, zt_flat, sigma_flat, x0_hat_flat)
+                logits = _model_logits_continuous(
+                    model, cfg, zt_flat, sigma_flat, x0_hat_flat
+                )
                 if binary_mode and logits.dim() == 3 and logits.size(-1) == 1:
                     logits = logits.squeeze(-1)
 
             if token_mode:
                 probs = torch.softmax(logits.float(), dim=-1).view(B, K, -1, V)
-                probs_eval = probs[:, :, cL:, :] if clean_prefix_mode else probs
-                loss_sum = _diffusion_loss_sum_tokens(probs_eval, x0_for_loss_ids)
+                probs_eval = (
+                    probs[:, :, cL:, :] if clean_prefix_mode else probs
+                )
+                loss_sum = _diffusion_loss_sum_tokens(
+                    probs_eval, x0_for_loss_ids, mask=eval_mask
+                )
             else:
                 probs = torch.sigmoid(logits.float()).view(B, K, -1)
                 probs_eval = probs[:, :, cL:] if clean_prefix_mode else probs
-                loss_sum = _diffusion_loss_sum_binary(probs_eval, x0_for_loss_dense)
+                loss_sum = _diffusion_loss_sum_binary(
+                    probs_eval, x0_for_loss_dense, mask=eval_mask
+                )
 
             ratio = loss_sum / (sigma**2)
             weighted = ratio * inv_qy
             diff_per_ex = weighted.mean(dim=1)
 
         if debug_integrand and bi < int(debug_first_n_batches):
+            if force_unconditional_path:
+                mode = "FORCE-UNCOND"
+            elif saw_clean_prefix_mode:
+                mode = "COND-CLEAN"
+            else:
+                mode = "UNCOND-AUTO"
             header = (
-                f"[VLB-DBG] mode={'FORCE-UNCOND' if force_unconditional_path else ('COND-CLEAN' if saw_clean_prefix_mode else 'UNCOND-AUTO')}"
-                f" bi={bi} B={B} K={K} cL={cL} S_full={S_full} S_eval={S_eval} "
-                f"sigma_min_eval={sigma_min_eval:g} sigma_max_eval={sigma_max_eval:g} "
+                f"[VLB-DBG] mode={mode} bi={bi} B={B} K={K} cL={cL} "
+                f"S_full={S_full} S_eval={S_eval} sigma_min_eval="
+                f"{sigma_min_eval:g} sigma_max_eval={sigma_max_eval:g} "
                 f"dist={sigma_sampling} repr={_repr_mode(cfg)}"
             )
             print(header)
@@ -629,28 +837,34 @@ def compute_vlb_over_loader(
         sum_recon += recon_per_ex.double().sum()
         sum_diff += diff_per_ex.double().sum()
         sum_count += torch.tensor(float(B), device=device, dtype=torch.float64)
+        if eval_mask is None:
+            batch_positions = float(B * S_eval)
+        else:
+            batch_positions = float(eval_mask.sum().item())
+        sum_positions += torch.tensor(
+            batch_positions, device=device, dtype=torch.float64
+        )
 
     if _ddp_is_on():
         dist.all_reduce(sum_prior, op=dist.ReduceOp.SUM)
         dist.all_reduce(sum_recon, op=dist.ReduceOp.SUM)
         dist.all_reduce(sum_diff, op=dist.ReduceOp.SUM)
         dist.all_reduce(sum_count, op=dist.ReduceOp.SUM)
+        dist.all_reduce(sum_positions, op=dist.ReduceOp.SUM)
 
     n = int(sum_count.item())
-    if n <= 0 or S_dim is None:
-        raise RuntimeError("No examples processed for VLB.")
+    evaluated_positions = int(sum_positions.item())
+    if n <= 0 or S_dim is None or evaluated_positions <= 0:
+        raise RuntimeError("No valid positions processed for VLB.")
 
-    prior_mean = (sum_prior / sum_count).float()
-    recon_mean = (sum_recon / sum_count).float()
-    diff_mean = (sum_diff / sum_count).float()
-
-    S_eval_final = int(S_dim)
-    if (not force_unconditional_path) and saw_clean_prefix_mode and allow_conditional_clean_prefix:
-        cL_full = _cond_len_positions(cfg, int(S_dim))
-        S_eval_final = max(1, int(S_dim - cL_full))
-
-    denom = float(math.log(2.0) * max(1, int(S_eval_final)))
-    vlb_bpd = (prior_mean + recon_mean + diff_mean) / denom
+    denom = sum_positions.float() * math.log(2.0)
+    vlb_bpd = (
+        sum_prior.float() + sum_recon.float() + sum_diff.float()
+    ) / denom
+    recon_bpd = sum_recon.float() / denom
+    diff_bpd = sum_diff.float() / denom
+    prior_bpd = sum_prior.float() / denom
+    mean_positions = max(1, int(round(evaluated_positions / n)))
 
     final_mode = (
         "FORCE-UNCOND"
@@ -660,14 +874,16 @@ def compute_vlb_over_loader(
 
     return VLBResult(
         vlb_bpd=float(vlb_bpd.item()),
-        recon_bpd=float((recon_mean / denom).item()),
-        diff_bpd=float((diff_mean / denom).item()),
-        prior_bpd=float((prior_mean / denom).item()),
+        recon_bpd=float(recon_bpd.item()),
+        diff_bpd=float(diff_bpd.item()),
+        prior_bpd=float(prior_bpd.item()),
         sigma_min_eval=float(sigma_min_eval),
         sigma_max_eval=float(sigma_max_eval),
         K=int(K),
         sigma_sampling=str(sigma_sampling),
         num_examples=int(n),
-        S_dim=int(S_eval_final),
+        num_positions=int(evaluated_positions),
+        S_dim=int(mean_positions),
         mode=str(final_mode),
+        position_scope=str(position_scope),
     )

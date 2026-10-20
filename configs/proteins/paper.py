@@ -1,0 +1,318 @@
+"""Training and evaluation settings for the 400M protein paper run."""
+
+from ml_collections import ConfigDict
+
+
+def get_config():
+    """Return the paper settings with local data and output paths."""
+    cfg = ConfigDict()
+    cfg.experiment = "proteins/paper"
+    cfg.output_root = ".trentinium/runs"
+    cfg.framework = "continuous_score"
+    cfg.device = "cuda:0"
+    cfg.data = ConfigDict(
+        {
+            "binarization": "raw_binary",
+            "bits_per_token": 5,
+            "channels": 1,
+            "dataset": "ProteinMultimodalLFQ",
+            "flatten_order": "flatten",
+            "long_chain_policy": "random_crop",
+            "max_len": 512,
+            "min_len": 40,
+            "num_workers": 8,
+            "patch_bits": 18,
+            "pin_memory": True,
+            "prefetch_factor": 4,
+            "representation": "binary",
+            "root": "datasets/dplm_paired_m0",
+            "seq_bits": 5,
+            "sequence_len": 2560,
+            "sequence_len_tokens": 512,
+            "sequence_replay_fraction": 0.2,
+            "sequence_replay_root": "datasets/uniref50_replay_v2",
+            "shard_dir": "datasets/dplm_paired_m0",
+            "source_weights": {
+                "afdb_rep": 0.0,
+                "afdb_swissprot": 1.0,
+                "esmatlas": 0.0,
+                "pdb": 2.0,
+            },
+            "struct_bits": 13,
+            "struct_convention_hash": "71220cdbbb22b4ff",
+            "task_weights": {
+                "forward_folding": 0.2,
+                "inverse_folding": 0.2,
+                "joint": 0.3,
+                "motif": 0.1,
+                "partial_pair": 0.04,
+                "sequence_inpaint": 0.05,
+                "sequence_marginal": 0.1,
+                "sequence_redesign": 0.03,
+                "structure_inpaint": 0.07,
+                "structure_marginal": 0.1,
+                "structure_redesign": 0.03,
+            },
+            "tokenizer": "char",
+            "use_mixture_schedule": True,
+            "vocab_size": 2,
+        }
+    )
+    cfg.model = ConfigDict(
+        {
+            "abs_pos_mode": "local_only",
+            "adaln_mode": "per_block",
+            "asymmetric_modality_time": True,
+            "center_inputs": True,
+            "content_dim_continuous": 128,
+            "content_dim_discrete": 64,
+            "continuous_logit_scaling": "none",
+            "dim_ff": 4096,
+            "dropout": 0.1,
+            "embed_dim": 1024,
+            "expected_num_parameters": 396226417,
+            "final_norm": True,
+            "gradient_checkpointing": True,
+            "head_dilation": 1,
+            "head_embed_dim": 64,
+            "head_hidden": 224,
+            "head_kernel": 3,
+            "head_type": "optimal_skip_mlp",
+            "head_use_cross_attn": True,
+            "head_use_local_mixer": True,
+            "head_use_self_attn": False,
+            "head_variant": "single",
+            "independent_modality_noise": True,
+            "lambda_seq": 1.0,
+            "lambda_struct": 1.0,
+            "length_conditioning": True,
+            "matched_filter_center": 0.5,
+            "matched_filter_clip": 30.0,
+            "matched_filter_scale": 1.0,
+            "multimodal": True,
+            "n_blocks": 20,
+            "n_fourier_global": 32,
+            "n_fourier_local": 4,
+            "n_heads": 16,
+            "n_pos_features": 1,
+            "name": "sdt",
+            "out_dim": 1,
+            "patch_size": 18,
+            "qk_norm": True,
+            "residue_pos_features": True,
+            "residue_pos_fraction": True,
+            "rope_base": 10000.0,
+            "rpb_max_distance": 1,
+            "scale_by_sigma": False,
+            "self_condition": True,
+            "use_adaln": True,
+            "use_flash_attn": True,
+            "use_rope_trunk": True,
+            "use_swiglu": True,
+            "warm_start_freeze_trunk_steps": 0,
+            "warm_start_seq_checkpoint": "",
+            "warm_start_trunk_lr_mult": 1.0,
+            "warm_start_use_ema": True,
+        }
+    )
+    cfg.diffusion = ConfigDict(
+        {
+            "continuous": {
+                "data_center": 0.5,
+                "p_mean": -1.2,
+                "p_std": 1.2,
+                "rho": 7.0,
+                "sigma_data": 0.5,
+                "sigma_max": 80.0,
+                "sigma_min": 0.002,
+            }
+        }
+    )
+    cfg.cond = ConfigDict(
+        {
+            "cond_len_chars": 0,
+            "cond_len_tokens": 0,
+            "enabled": False,
+            "loss_on_suffix_only": False,
+            "noise_prefix": True,
+            "null_strategy": "half",
+            "p_uncond": 1.0,
+            "sample_prompt_len": False,
+        }
+    )
+    cfg.train = ConfigDict(
+        {
+            "allow_tf32": True,
+            "amp_dtype": "bf16",
+            "batch_size": 256,
+            "cfg_drop_prob": 0.1,
+            "checkpoint_every_seconds": 900,
+            "checkpointing": {
+                "interval": {
+                    "enabled": True,
+                    "every_steps": 20000,
+                    "keep_last": 3,
+                },
+                "metric": "task_score",
+                "mode": "max",
+                "resume_interval": {"enabled": True, "every_steps": 2000},
+                "save_last": True,
+                "save_top_k": 2,
+            },
+            "compile_mode": "default",
+            "coupled_sigma_prob": 0.3,
+            "deterministic": False,
+            "ema_decay": 0.9999,
+            "entropy_buffer_size": 200000,
+            "entropy_compute": False,
+            "entropy_gamma_max": 1.0,
+            "entropy_min_per_bin": 200,
+            "entropy_mode": "regularized",
+            "entropy_num_bins": 128,
+            "entropy_offline": {"enabled": False},
+            "entropy_plot_every_k_epochs": 5,
+            "entropy_regularizer_c": 0.1,
+            "entropy_regularizer_n": 3.0,
+            "entropy_target": "rate",
+            "entropy_transition_steps": 5000,
+            "entropy_update_every_steps": 2000,
+            "entropy_use_for_sampling": False,
+            "entropy_warmup_steps": 10000,
+            "epochs": 60,
+            "exit_margin_seconds": 600,
+            "expected_world_size": 8,
+            "external_ppl": {"enabled": False},
+            "generation": {"enabled": False},
+            "global_batch_size": 512,
+            "global_loss_normalizer": True,
+            "grad_accum_steps": 2,
+            "loss_type": "binary_sm",
+            "loss_weighting": "edm",
+            "mauve": {"enabled": False},
+            "preempt_check_every_steps": 20,
+            "sanity": {"enabled": False, "run_epoch": -1},
+            "seed": 42,
+            "self_condition_prob": 0.5,
+            "sigma_sampling_strategy": "log-normal",
+            "steps_per_epoch": 5000,
+            "task_eval": {
+                "every_steps": 5000,
+                "max_length": 384,
+                "num_proteins": 256,
+                "num_steps": 32,
+                "seed": 12345,
+            },
+            "use_compile": False,
+            "use_fp16": False,
+            "validation_max_batches": 100,
+            "validation_self_condition": True,
+            "visualization": {"enabled": False},
+            "vlb": {
+                "allow_conditional_clean_prefix": True,
+                "batch_size": 64,
+                "debug_compare_noise_prefix": True,
+                "debug_compare_null_prefix": True,
+                "debug_first_n_batches": 1,
+                "debug_integrand": False,
+                "debug_num_sigma_bins": 6,
+                "enabled": True,
+                "every_k_epochs": 1,
+                "force_unconditional_path": False,
+                "include_prior": False,
+                "max_batches_train": None,
+                "max_batches_val": 50,
+                "null_prefix_mode": "constant",
+                "null_prefix_value": 0.0,
+                "num_mc_samples_per_batch": 1,
+                "progress": False,
+                "sigma_max_eval": None,
+                "sigma_min_eval": 0.08,
+                "sigma_sampling": "log-uniform",
+                "splits": ["val"],
+                "use_amp": True,
+            },
+        }
+    )
+    cfg.optim = ConfigDict(
+        {
+            "beta1": 0.9,
+            "beta2": 0.95,
+            "eps": 1e-08,
+            "grad_clip": 1.0,
+            "lr": 0.00011,
+            "min_lr": 1e-06,
+            "optimizer": "AdamW",
+            "scheduler": "cosine_decay",
+            "total_steps": 300000,
+            "warmup": 10000,
+            "weight_decay": 0.01,
+        }
+    )
+    cfg.evaluation = ConfigDict(
+        {
+            ("checkpoint_path"): (
+                ".trentinium/runs/proteins/paper/checkpoints/best.pt"
+            ),
+            ("best_checkpoint_path"): (
+                ".trentinium/runs/proteins/paper/checkpoints/best.pt"
+            ),
+            "out_dir": ".trentinium/results/proteins",
+            "samples_dir": ".trentinium/results/proteins/samples",
+            "solver": "ddim_entropic",
+            "schedule": "entropic",
+            "num_sampling_steps": 50,
+            "guidance_scale": 5.0,
+            "entropic_blend_alpha": 0.0,
+            "sigma_min": 0.002,
+            "sigma_max": 80.0,
+            "struct_sigma_scale": 1.0,
+            "use_amp": False,
+            "use_compile": False,
+            "stochastic": {
+                "enabled": True,
+                "s_churn": 10.0,
+                "s_noise": 1.0,
+                "window_mode": "entropy_cdf",
+                "entropy_quantile_lo": 0.1,
+                "entropy_quantile_hi": 0.9,
+                "entropy_fallback": "error",
+            },
+            "entropy": {
+                "num_bins": 128,
+                "samples_per_unit": 8,
+                "num_backbones": 128,
+                "seed": 20260827,
+                "rate_power": 0.5,
+                "regularizer_c": 0.1,
+                "regularizer_n": 3.0,
+            },
+            "validation_data": "datasets/cath43/validation.npz",
+            "inverse_data": "datasets/cath43/test.npz",
+            ("forward_targets"): (
+                "datasets/benchmarks/cameo2022_dplm21/targets.json"
+            ),
+            "struct_tokenizer": "datasets/dplm_struct_tokenizer",
+            "length_grid": [100, 200, 300, 400, 500],
+            "samples_per_length": 16,
+            "num_samples": 4,
+            "seed": 20260827,
+        }
+    )
+    cfg.logging = ConfigDict(
+        {
+            "use_wandb": False,
+            "tensorboard": {
+                "enabled": True,
+                "log_dir": "auto",
+                "scalar_every_steps": 20,
+                "sync_to_run_dir": True,
+                "sync_every_epochs": 1,
+                "sync_every_steps": 500,
+                "flush_secs": 30,
+                "max_queue": 2000,
+                "fail_silently": True,
+                "copy_existing_to_scratch": True,
+            },
+        }
+    )
+    return cfg

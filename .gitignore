@@ -1,73 +1,61 @@
-# Byte-compiled / optimized / C extensions
+# Private notes, archived source, logs, and results
+.trentinium/
+
+# Python and local environments
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
+*.py[cod]
 *.so
-
-# Distribution / packaging
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
-
-# Virtual environments
-.env
-.venv
-env/
+.venv/
+.venvs/
 venv/
-ENV/
-env.bak/
-venv.bak/
+env/
+.env
+*.egg-info/
+build/
+dist/
 
-# Editor / OS
-.vscode/
-.idea/
-.DS_Store
-*.swp
-*.swo
-
-# PyTorch / Triton / Inductor caches
-torch_compile_debug/
-.torch_compile_cache/
-.triton_cache/
-
-# Project-specific large/transient data
-# datasets/  — symlinks to dataset caches; rebuild via scripts/lm1b/ and scripts/owt/
+# Downloaded and prepared datasets, including raw downloads and caches
 datasets/
-# runs/      — training outputs, checkpoints, eval results
-runs/
-# logs/      — SLURM job logs and stdout/stderr captures
-logs/
-# hf_cache  — HuggingFace model cache symlink (gpt2-large, tokenizers, etc.)
-hf_cache
+
+# Downloaded models and source
+external/
 hf_cache/
-# wandb/     — Weights & Biases run directory
+*.pt
+*.pth
+*.ckpt
+!assets/entropy_tables/**/*.pt
+*.tar
+*.tar.gz
+*.sqsh
+_transfer/
+
+# Outputs from upstream text commands
+runs/
+results/
+logs/
 wandb/
 generated_samples/
 generated_output.png
 
-# Model checkpoints (anywhere they accidentally land outside runs/)
-*.pth
-*.pt
-*.ckpt
-# Exception: entropy-rate schedule artefacts that ship with the repo and are
-# loaded at evaluation time (assets/entropy_tables/<dataset>/entropy_*.pt).
-!assets/entropy_tables/**/*.pt
-
-# Crash dumps
+# Local tools, editor state, and credentials
+.agents/
+.codex/
+.claude/
+.vscode/
+.idea/
+.tools/
+.cache/
+.config/
+.uv-cache/
+.pytest_cache/
+.ruff_cache/
+.protebit_site.env
+.netrc
+.DS_Store
+*.swp
+*.swo
 core
 core.*
+torch_compile_debug/
+.torch_compile_cache/
+.triton_cache/

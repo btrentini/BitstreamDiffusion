@@ -1,9 +1,8 @@
-#utils/schedule_controller.py
+# utils/schedule_controller.py
 from __future__ import annotations
 
 import math
 from pathlib import Path
-from typing import Optional, Tuple
 
 import torch
 
@@ -17,11 +16,61 @@ except Exception:  # pragma: no cover
 # Gabriel regularized entropy gate:
 #   g(σ) = σ^n / (σ^n + c^n) = x/(1+x) where x=(σ/c)^n
 # -------------------------------------------------------------------------
-def _generalized_regularizer(sigmas: torch.Tensor, c: float, n: float) -> torch.Tensor:
+def _generalized_regularizer(
+    sigmas: torch.Tensor, c: float, n: float
+) -> torch.Tensor:
     c = float(max(c, 1e-12))
     n = float(n)
     x = (sigmas.clamp_min(1e-12) / c).pow(n)
     return x / (1.0 + x)
+
+
+def regularized_entropy_weights(
+    mean_rate: torch.Tensor,
+    sigmas: torch.Tensor,
+    *,
+    c: float,
+    n: float,
+    power: float,
+) -> torch.Tensor:
+    """Return the unnormalised weights used by the CoBit entropy schedule."""
+    mean_rate = mean_rate.float().clamp_min(0.0)
+    sigmas = sigmas.to(device=mean_rate.device, dtype=torch.float32)
+    rate_term = (
+        mean_rate.pow(float(power))
+        if float(power) != 0.0
+        else torch.ones_like(mean_rate)
+    )
+    return (
+        _generalized_regularizer(sigmas, c=c, n=n).to(torch.float32)
+        * rate_term
+    )
+
+
+def _blend_entropy_with_base(
+    learned_pdf: torch.Tensor,
+    base_pdf: torch.Tensor,
+    count: torch.Tensor,
+    min_per_bin: int,
+    base_fraction: float,
+) -> torch.Tensor:
+    """Coverage-smooth a learned PDF and apply an explicit base floor."""
+    if not 0.0 <= float(base_fraction) <= 1.0:
+        raise ValueError(
+            f"cfg.train.entropy_base_fraction must be in [0, 1], got "
+            f"{base_fraction}"
+        )
+    learned_pdf = learned_pdf.float().clamp_min(0.0)
+    base_pdf = base_pdf.float().clamp_min(0.0)
+    learned_pdf = learned_pdf / learned_pdf.sum().clamp_min(1e-12)
+    base_pdf = base_pdf / base_pdf.sum().clamp_min(1e-12)
+    reliability = (count.float() / float(max(1, min_per_bin))).clamp(0.0, 1.0)
+    coverage_pdf = reliability * learned_pdf + (1.0 - reliability) * base_pdf
+    coverage_pdf = coverage_pdf / coverage_pdf.sum().clamp_min(1e-12)
+    pdf = (1.0 - float(base_fraction)) * coverage_pdf + float(
+        base_fraction
+    ) * base_pdf
+    return pdf.clamp_min(0.0) / pdf.sum().clamp_min(1e-12)
 
 
 class EntropyScheduleController:
@@ -55,26 +104,44 @@ class EntropyScheduleController:
         self.proc = proc
 
         # Sanity: trainer must have FIFO state
-        assert hasattr(trainer, "_entropy_sig_buf"), "Trainer must allocate _entropy_sig_buf in __init__"
-        assert hasattr(trainer, "_entropy_metric_buf"), "Trainer must allocate _entropy_metric_buf in __init__"
-        assert hasattr(trainer, "_entropy_buf_ptr"), "Trainer must define _entropy_buf_ptr in __init__"
-        assert hasattr(trainer, "_entropy_buf_len"), "Trainer must define _entropy_buf_len in __init__"
+        assert hasattr(trainer, "_entropy_sig_buf"), (
+            "Trainer must allocate _entropy_sig_buf in __init__"
+        )
+        assert hasattr(trainer, "_entropy_metric_buf"), (
+            "Trainer must allocate _entropy_metric_buf in __init__"
+        )
+        assert hasattr(trainer, "_entropy_buf_ptr"), (
+            "Trainer must define _entropy_buf_ptr in __init__"
+        )
+        assert hasattr(trainer, "_entropy_buf_len"), (
+            "Trainer must define _entropy_buf_len in __init__"
+        )
 
         # Schedule tensors (live on GPU device)
-        self.trainer._entropy_ready = bool(getattr(self.trainer, "_entropy_ready", False))
+        self.trainer._entropy_ready = bool(
+            getattr(self.trainer, "_entropy_ready", False)
+        )
         self.trainer._entropy_pdf = getattr(self.trainer, "_entropy_pdf", None)
         self.trainer._entropy_cdf = getattr(self.trainer, "_entropy_cdf", None)
-        self.trainer._entropy_sigmas = getattr(self.trainer, "_entropy_sigmas", None)  # midpoints
-        self.trainer._entropy_edges = getattr(self.trainer, "_entropy_edges", None)   # edges
+        self.trainer._entropy_sigmas = getattr(
+            self.trainer, "_entropy_sigmas", None
+        )  # midpoints
+        self.trainer._entropy_edges = getattr(
+            self.trainer, "_entropy_edges", None
+        )  # edges
 
         # Diagnostics
-        self.trainer._entropy_ln_mu = getattr(self.trainer, "_entropy_ln_mu", None)
-        self.trainer._entropy_ln_std = getattr(self.trainer, "_entropy_ln_std", None)
+        self.trainer._entropy_ln_mu = getattr(
+            self.trainer, "_entropy_ln_mu", None
+        )
+        self.trainer._entropy_ln_std = getattr(
+            self.trainer, "_entropy_ln_std", None
+        )
 
     # ──────────────────────────────────────────────────────────────────────
     # Disk IO (optional but useful)
     # ──────────────────────────────────────────────────────────────────────
-    def entropy_paths(self) -> Tuple[Path, Path, Path, Path]:
+    def entropy_paths(self) -> tuple[Path, Path, Path, Path]:
         run_dir = Path(self.trainer.run_dir)
         return (
             run_dir / "entropy_pdf.pt",
@@ -106,7 +173,9 @@ class EntropyScheduleController:
             self.trainer._entropy_pdf = torch.load(pdf_p, map_location=dev)
             self.trainer._entropy_cdf = torch.load(cdf_p, map_location=dev)
             self.trainer._entropy_sigmas = torch.load(sig_p, map_location=dev)
-            self.trainer._entropy_edges = torch.load(edg_p, map_location=dev) if edg_p.exists() else None
+            self.trainer._entropy_edges = (
+                torch.load(edg_p, map_location=dev) if edg_p.exists() else None
+            )
             self.trainer._entropy_ready = True
             self.fit_lognormal_to_entropy_profile()
 
@@ -132,13 +201,37 @@ class EntropyScheduleController:
         """
         buf_len = int(getattr(self.trainer, "_entropy_buf_len", 0))
         num_bins = int(getattr(self.trainer, "entropy_num_bins", 256))
-        min_per_bin = int(getattr(self.trainer.cfg.train, "entropy_min_per_bin", 10))
+        min_per_bin = int(
+            getattr(self.trainer.cfg.train, "entropy_min_per_bin", 10)
+        )
         return buf_len >= (num_bins * min_per_bin)
 
+    def _base_bin_pdf(self, edges: torch.Tensor) -> torch.Tensor:
+        """Return truncated base-sigma probability mass for each bin."""
+        edges = edges.detach().to("cpu", dtype=torch.float64).clamp_min(1e-12)
+        strategy = str(
+            getattr(
+                self.trainer.cfg.train,
+                "sigma_sampling_strategy",
+                "log-uniform",
+            )
+        ).lower()
+        if strategy == "log-normal":
+            cfg_cont = self.trainer.cfg.diffusion.continuous
+            mean = float(getattr(cfg_cont, "p_mean", -1.2))
+            std = max(float(getattr(cfg_cont, "p_std", 1.2)), 1e-12)
+            z = (edges.log() - mean) / (std * math.sqrt(2.0))
+            cdf = 0.5 * (1.0 + torch.erf(z))
+            mass = (cdf[1:] - cdf[:-1]).clamp_min(0.0)
+        else:
+            mass = (edges[1:].log() - edges[:-1].log()).clamp_min(0.0)
+        total = float(mass.sum().item())
+        if not math.isfinite(total) or total <= 0.0:
+            mass = torch.ones(edges.numel() - 1, dtype=torch.float64)
+        return (mass / mass.sum()).to(torch.float32)
+
     def _get_edges_on_device(self) -> torch.Tensor:
-        """
-        Prefer stored edges, otherwise reconstruct edges from midpoints.
-        """
+        """Prefer stored edges, otherwise reconstruct edges from midpoints."""
         dev = self.trainer.device
         edges = getattr(self.trainer, "_entropy_edges", None)
 
@@ -160,7 +253,10 @@ class EntropyScheduleController:
 
         if K == 1:
             edges_log = torch.tensor(
-                [math.log(float(self.proc.sigma_min)), math.log(float(self.proc.sigma_max))],
+                [
+                    math.log(float(self.proc.sigma_min)),
+                    math.log(float(self.proc.sigma_max)),
+                ],
                 device=dev,
                 dtype=torch.float32,
             )
@@ -185,11 +281,15 @@ class EntropyScheduleController:
                       linear 0->gamma_max over transition
                       gamma_max afterwards
 
-        If gamma_max=1.0 => becomes fully entropic after warmup+transition.
+        If gamma_max=1.0 => becomes fully entropic after
+        warmup+transition.
         """
-
         if bool(getattr(self.trainer, "entropy_offline_enabled", False)):
-            return 1.0 if bool(getattr(self.trainer, "_entropy_ready", False)) else 0.0
+            return (
+                1.0
+                if bool(getattr(self.trainer, "_entropy_ready", False))
+                else 0.0
+            )
 
         if not bool(getattr(self.trainer, "entropy_use_for_sampling", False)):
             return 0.0
@@ -217,7 +317,9 @@ class EntropyScheduleController:
         """
         if not bool(getattr(self.trainer, "_entropy_ready", False)):
             # if schedule not ready, fallback
-            return self.proc.sample_sigma(bsz, strategy="log-uniform").to(self.trainer.device)
+            return self.proc.sample_sigma(bsz, strategy="log-uniform").to(
+                self.trainer.device
+            )
 
         dev = self.trainer.device
 
@@ -237,14 +339,17 @@ class EntropyScheduleController:
         log_sigma = lo.log() + u2 * (hi.log() - lo.log())
         sigma = log_sigma.exp()
 
-        return sigma.clamp(min=float(self.proc.sigma_min), max=float(self.proc.sigma_max))
+        return sigma.clamp(
+            min=float(self.proc.sigma_min), max=float(self.proc.sigma_max)
+        )
 
     def draw_sigma(self, bsz: int) -> torch.Tensor:
         """
         Training-time σ sampling.
 
         Behavior:
-          - Base strategy from cfg.train.sigma_sampling_strategy ("log-uniform"/"log-normal").
+          - Base strategy from cfg.train.sigma_sampling_strategy
+          ("log-uniform"/"log-normal").
           - If entropy_use_for_sampling:
               * before warmup: base only
               * warmup->transition: mixture base/entropy (gamma ramps)
@@ -255,22 +360,41 @@ class EntropyScheduleController:
             raise RuntimeError("draw_sigma only valid for continuous_score.")
 
         if self.trainer.is_master and self.trainer.global_step < 5:
-            print("draw_sigma source:", "offline-entropic" if self.trainer.entropy_offline_enabled and self.trainer._entropy_ready else "base")
+            print(
+                "draw_sigma source:",
+                "offline-entropic"
+                if self.trainer.entropy_offline_enabled
+                and self.trainer._entropy_ready
+                else "base",
+            )
 
-        strat = str(getattr(self.trainer.cfg.train, "sigma_sampling_strategy", "log-uniform")).lower()
+        strat = str(
+            getattr(
+                self.trainer.cfg.train,
+                "sigma_sampling_strategy",
+                "log-uniform",
+            )
+        ).lower()
 
         # Base sampling
         if strat == "log-normal":
-            p_mean = getattr(self.trainer.cfg.diffusion.continuous, "p_mean", -1.2)
-            p_std = getattr(self.trainer.cfg.diffusion.continuous, "p_std", 1.2)
-            sigma_base = self.proc.sample_sigma(bsz, strategy="log-normal", p_mean=p_mean, p_std=p_std)
+            p_mean = getattr(
+                self.trainer.cfg.diffusion.continuous, "p_mean", -1.2
+            )
+            p_std = getattr(
+                self.trainer.cfg.diffusion.continuous, "p_std", 1.2
+            )
+            sigma_base = self.proc.sample_sigma(
+                bsz, strategy="log-normal", p_mean=p_mean, p_std=p_std
+            )
         else:
             # default: log-uniform
             sigma_base = self.proc.sample_sigma(bsz, strategy="log-uniform")
 
         sigma_base = sigma_base.to(self.trainer.device)
 
-        # OFFLINE MODE: if a fixed profile exists, use it immediately (no warmup/transition)
+        # OFFLINE MODE: if a fixed profile exists, use it immediately
+        # (no warmup/transition)
         if bool(getattr(self.trainer, "entropy_offline_enabled", False)):
             if bool(getattr(self.trainer, "_entropy_ready", False)):
                 return self.sample_entropy_sigma(bsz).to(self.trainer.device)
@@ -296,15 +420,20 @@ class EntropyScheduleController:
             return sigma_base
 
         sigma_mix = sigma_base.clone()
-        sigma_mix[use_ent] = self.sample_entropy_sigma(n_ent).to(self.trainer.device)
+        sigma_mix[use_ent] = self.sample_entropy_sigma(n_ent).to(
+            self.trainer.device
+        )
         return sigma_mix
 
     # ──────────────────────────────────────────────────────────────────────
     # FIFO buffer updates (delegated to Trainer)
     # ──────────────────────────────────────────────────────────────────────
-    def update_entropy_buffer(self, sigma: torch.Tensor, entropy_metric: torch.Tensor) -> None:
+    def update_entropy_buffer(
+        self, sigma: torch.Tensor, entropy_metric: torch.Tensor
+    ) -> None:
         """
-        Call this from training step *after* you compute the entropy metric.
+        Call this from training step *after* you compute the entropy
+        metric.
         """
         if not bool(getattr(self.trainer, "entropy_compute", False)):
             return
@@ -316,7 +445,8 @@ class EntropyScheduleController:
     @torch.no_grad()
     def recompute_entropy_from_buffer(self) -> None:
         """
-        Build entropy schedule from FIFO buffer in RegularizedEntropyMode:
+        Build entropy schedule from FIFO buffer in
+        RegularizedEntropyMode:
 
             rate_samples = metric / σ^2
             mean_rate(bin) = mean(rate_samples in bin)
@@ -324,12 +454,16 @@ class EntropyScheduleController:
             q(bin) ∝ g(σ_mid; c,n) * mean_rate(bin)^power
 
         Robustness goals:
-        - FIFO buffers are on CPU (Trainer.entropy_fifo_push enforces this), but we still
+        - FIFO buffers are on CPU (Trainer.entropy_fifo_push enforces
+        this), but we still
             defensively move to CPU here.
-        - DDP-safe: rank0 decides whether to update and broadcasts a flag; if updating,
+        - DDP-safe: rank0 decides whether to update and broadcasts a
+        flag; if updating,
             rank0 broadcasts the schedule tensors to all ranks.
-        - Config plumbing: reads bins/power/target from cfg first, then falls back to trainer attrs.
-        - Numerically safe: clamps, handles empty/degenerate histograms, enforces proper CDF.
+        - Config plumbing: reads bins/power/target from cfg first, then
+        falls back to trainer attrs.
+        - Numerically safe: clamps, handles empty/degenerate histograms,
+        enforces proper CDF.
         """
         if not bool(getattr(self.trainer, "entropy_compute", False)):
             return
@@ -359,22 +493,33 @@ class EntropyScheduleController:
         cfg_train = getattr(self.trainer.cfg, "train", None)
 
         def _cfg_get(name: str, default):
-            return getattr(cfg_train, name, default) if cfg_train is not None else default
+            return (
+                getattr(cfg_train, name, default)
+                if cfg_train is not None
+                else default
+            )
 
         num_bins = int(
-            _cfg_get("entropy_num_bins", getattr(self.trainer, "entropy_num_bins", 256))
+            _cfg_get(
+                "entropy_num_bins",
+                getattr(self.trainer, "entropy_num_bins", 256),
+            )
         )
         num_bins = max(2, num_bins)  # need at least 2 bins
 
-        # Determine power from config if possible.
-        # Priority:
+        # Determine power from config if possible. Priority:
         #   1) cfg.train.entropy_rate_power (explicit float)
         #   2) cfg.train.entropy_target in {"rate","sqrt"}  -> {1.0, 0.5}
         #   3) trainer.entropy_rate_power
         power = _cfg_get("entropy_rate_power", None)
         if power is None:
             target = str(_cfg_get("entropy_target", "")).lower().strip()
-            if target in ("sqrt", "sqrt-rate", "sqrt_rate", "sqrt_rate_samples"):
+            if target in (
+                "sqrt",
+                "sqrt-rate",
+                "sqrt_rate",
+                "sqrt_rate_samples",
+            ):
                 power = 0.5
             elif target in ("rate", "rate-only", "rate_only"):
                 power = 1.0
@@ -393,7 +538,9 @@ class EntropyScheduleController:
             pdf_dev = torch.empty((num_bins,), device=dev, dtype=torch.float32)
             cdf_dev = torch.empty((num_bins,), device=dev, dtype=torch.float32)
             mid_dev = torch.empty((num_bins,), device=dev, dtype=torch.float32)
-            edges_dev = torch.empty((num_bins + 1,), device=dev, dtype=torch.float32)
+            edges_dev = torch.empty(
+                (num_bins + 1,), device=dev, dtype=torch.float32
+            )
 
             dist.broadcast(pdf_dev, src=0)
             dist.broadcast(cdf_dev, src=0)
@@ -401,9 +548,17 @@ class EntropyScheduleController:
             dist.broadcast(edges_dev, src=0)
 
             # Minimal sanity (avoid NaNs silently propagating)
-            if not torch.isfinite(pdf_dev).all() or not torch.isfinite(cdf_dev).all():
+            if (
+                not torch.isfinite(pdf_dev).all()
+                or not torch.isfinite(cdf_dev).all()
+            ):
                 # Fallback to uniform to avoid crashing training
-                pdf_dev = torch.full((num_bins,), 1.0 / float(num_bins), device=dev, dtype=torch.float32)
+                pdf_dev = torch.full(
+                    (num_bins,),
+                    1.0 / float(num_bins),
+                    device=dev,
+                    dtype=torch.float32,
+                )
                 cdf_dev = torch.cumsum(pdf_dev, dim=0)
                 cdf_dev[-1] = 1.0
 
@@ -420,7 +575,13 @@ class EntropyScheduleController:
         # Rank0 (master) computes schedule from FIFO ring buffer
         # ----------------------------
         # Buffer metadata
-        cap = int(getattr(self.trainer, "_entropy_buf_cap", self.trainer._entropy_sig_buf.numel()))
+        cap = int(
+            getattr(
+                self.trainer,
+                "_entropy_buf_cap",
+                self.trainer._entropy_sig_buf.numel(),
+            )
+        )
         buf_len = int(getattr(self.trainer, "_entropy_buf_len", 0))
         cap = max(1, cap)
         buf_len = max(0, min(buf_len, cap))
@@ -447,15 +608,29 @@ class EntropyScheduleController:
             metr = metr[finite]
         else:
             # degenerate: fallback uniform schedule
-            pdf = torch.full((num_bins,), 1.0 / float(num_bins), dtype=torch.float32)
+            pdf = torch.full(
+                (num_bins,), 1.0 / float(num_bins), dtype=torch.float32
+            )
             cdf = torch.cumsum(pdf, dim=0)
             cdf[-1] = 1.0
             sigma_min = float(self.proc.sigma_min)
             sigma_max = float(self.proc.sigma_max)
-            edges_log = torch.linspace(math.log(sigma_min), math.log(sigma_max), num_bins + 1, dtype=torch.float32)
-            mids = (0.5 * (edges_log[:-1] + edges_log[1:])).exp().clamp(min=1e-12)
+            edges_log = torch.linspace(
+                math.log(sigma_min),
+                math.log(sigma_max),
+                num_bins + 1,
+                dtype=torch.float32,
+            )
+            mids = (
+                (0.5 * (edges_log[:-1] + edges_log[1:])).exp().clamp(min=1e-12)
+            )
             edges_sigma = edges_log.exp().clamp(min=1e-12)
-            pdf_dev, cdf_dev, mid_dev, edges_dev = pdf.to(dev), cdf.to(dev), mids.to(dev), edges_sigma.to(dev)
+            pdf_dev, cdf_dev, mid_dev, edges_dev = (
+                pdf.to(dev),
+                cdf.to(dev),
+                mids.to(dev),
+                edges_sigma.to(dev),
+            )
             if is_ddp:
                 dist.broadcast(pdf_dev, src=0)
                 dist.broadcast(cdf_dev, src=0)
@@ -475,13 +650,17 @@ class EntropyScheduleController:
         sigma_min = float(self.proc.sigma_min)
         sigma_max = float(self.proc.sigma_max)
         sigma_min = max(sigma_min, 1e-12)
-        sigma_max = max(sigma_max, sigma_min * 1.0000001)  # avoid log_max==log_min
+        sigma_max = max(
+            sigma_max, sigma_min * 1.0000001
+        )  # avoid log_max==log_min
         sig = sig.clamp(min=sigma_min, max=sigma_max)
 
         # Build log-spaced edges on CPU
         log_min = math.log(sigma_min)
         log_max = math.log(sigma_max)
-        edges_log = torch.linspace(log_min, log_max, num_bins + 1, dtype=torch.float32)
+        edges_log = torch.linspace(
+            log_min, log_max, num_bins + 1, dtype=torch.float32
+        )
 
         # Bin index in [0, num_bins-1]
         log_sig = sig.log()
@@ -496,7 +675,9 @@ class EntropyScheduleController:
         sum_rate = torch.zeros((num_bins,), dtype=torch.float32)
         count = torch.zeros((num_bins,), dtype=torch.float32)
         sum_rate.scatter_add_(0, bin_idx, rate_samples)
-        count.scatter_add_(0, bin_idx, torch.ones_like(rate_samples, dtype=torch.float32))
+        count.scatter_add_(
+            0, bin_idx, torch.ones_like(rate_samples, dtype=torch.float32)
+        )
 
         mean_rate = sum_rate / (count + 1e-8)
         mean_rate = torch.clamp(mean_rate, min=0.0)
@@ -506,20 +687,39 @@ class EntropyScheduleController:
         mids = mid_log.exp().clamp(min=1e-12)
         edges_sigma = edges_log.exp().clamp(min=1e-12)
 
-        # Regularizer g(sigma_mid)
-        reg = _generalized_regularizer(mids, c=c, n=n).to(torch.float32)
+        unnormalized = regularized_entropy_weights(
+            mean_rate,
+            mids,
+            c=c,
+            n=n,
+            power=power,
+        )
 
-        # Rate exponent
-        rate_term = mean_rate.pow(power) if power != 0.0 else torch.ones_like(mean_rate)
-
-        unnormalized = reg * rate_term
-
-        # Handle degeneracies / NaNs / all-zero
-        good = torch.isfinite(unnormalized).all() and float(unnormalized.sum().item()) > 0.0
+        # Normalize the learned component before mixing it with
+        # probability mass from the configured base distribution.
+        good = (
+            torch.isfinite(unnormalized).all()
+            and float(unnormalized.sum().item()) > 0.0
+        )
         if not good:
-            pdf = torch.full((num_bins,), 1.0 / float(num_bins), dtype=torch.float32)
+            learned_pdf = self._base_bin_pdf(edges_sigma)
         else:
-            pdf = unnormalized / unnormalized.sum()
+            learned_pdf = unnormalized / unnormalized.sum()
+
+        base_pdf = self._base_bin_pdf(edges_sigma)
+
+        # Give entropy_min_per_bin a real per-bin meaning.
+        # Under-populated bins shrink toward the base distribution, so
+        # an empty bin cannot remain a permanent zero-probability state
+        # merely because it receives no samples.
+        min_per_bin = max(1, int(_cfg_get("entropy_min_per_bin", 10)))
+        # Explicit base-distribution floor. At 1 this is a pure base
+        # sampler; at 0 only the under-populated-bin coverage prior
+        # remains.
+        base_fraction = float(_cfg_get("entropy_base_fraction", 0.0))
+        pdf = _blend_entropy_with_base(
+            learned_pdf, base_pdf, count, min_per_bin, base_fraction
+        )
 
         # CDF must be monotone and end at 1
         cdf = torch.cumsum(pdf, dim=0)
@@ -550,22 +750,39 @@ class EntropyScheduleController:
         # Save + diagnostics
         if is_master:
             self.save_entropy_tables(pdf_dev, cdf_dev, mid_dev, edges_dev)
+            writer = getattr(self.trainer, "writer", None)
+            step = int(getattr(self.trainer, "global_step", 0))
+            if writer is not None:
+                writer.add_scalar("entropy/base_fraction", base_fraction, step)
+                writer.add_scalar(
+                    "entropy/underfilled_bins",
+                    int((count < float(min_per_bin)).sum().item()),
+                    step,
+                )
+                writer.add_scalar(
+                    "entropy/min_bin_count", float(count.min().item()), step
+                )
+                writer.add_histogram("entropy/bin_counts", count, step)
+                writer.add_histogram("entropy/final_pdf", pdf, step)
 
         self.fit_lognormal_to_entropy_profile()
 
         if is_master:
             print(
-                f"✓ Entropy schedule updated: FIFO={buf_len}/{cap}, bins={num_bins}, "
-                f"mode=regularized, c={c}, n={n}, power={power}"
+                f"✓ Entropy schedule updated: FIFO={buf_len}/{cap}, bins="
+                f"{num_bins}, mode=regularized, c={c}, n={n}, power="
+                f"{power}, base_fraction={base_fraction}, "
+                f"underfilled_bins="
+                f"{int((count < float(min_per_bin)).sum().item())}"
             )
-
 
     # ──────────────────────────────────────────────────────────────────────
     # Diagnostics
     # ──────────────────────────────────────────────────────────────────────
     def fit_lognormal_to_entropy_profile(self) -> None:
         """
-        Diagnostic-only: fit LogNormal(mu, std_log) to discrete PDF over midpoints.
+        Diagnostic-only: fit LogNormal(mu, std_log) to discrete PDF over
+        midpoints.
         """
         if not bool(getattr(self.trainer, "_entropy_ready", False)):
             self.trainer._entropy_ln_mu = None
@@ -593,4 +810,8 @@ class EntropyScheduleController:
         self.trainer._entropy_ln_std = float(std.item())
 
         if bool(getattr(self.trainer, "is_master", False)):
-            print(f"✓ (diag) fitted LogNormal: μ={self.trainer._entropy_ln_mu:.3f}, σlog={self.trainer._entropy_ln_std:.3f}")
+            print(
+                f"✓ (diag) fitted LogNormal: μ="
+                f"{self.trainer._entropy_ln_mu:.3f}, σlog="
+                f"{self.trainer._entropy_ln_std:.3f}"
+            )
